@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pi (runtime for checks)
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Install package dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Resolve pi root
+        id: piroot
+        run: echo "path=$(npm root -g)/@earendil-works/pi-coding-agent" >> "$GITHUB_OUTPUT"
+
+      - name: Run checks
+        env:
+          PI_CODING_AGENT_ROOT: ${{ steps.piroot.outputs.path }}
+        run: npm run check

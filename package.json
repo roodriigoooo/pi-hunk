@@ -1,0 +1,58 @@
+{
+  "name": "pi-huff",
+  "version": "0.1.0",
+  "description": "Shiki-highlighted terminal diffs and a read-only Hunk review bridge for the pi coding agent.",
+  "type": "module",
+  "license": "MIT",
+  "author": "rosastre",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rosastre/pi-huff.git"
+  },
+  "homepage": "https://github.com/rosastre/pi-huff",
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "dependencies": {
+    "diff": "^8.0.4",
+    "shiki": "^3.16.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-agent-core": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true },
+    "typebox": { "optional": true }
+  },
+  "scripts": {
+    "check": "node scripts/units.mjs && node scripts/smoke.mjs"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "diff",
+    "hunk",
+    "shiki",
+    "terminal"
+  ]
+}
