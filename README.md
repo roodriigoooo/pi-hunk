@@ -1,5 +1,7 @@
 # pi-huff
 
+[![npm version](https://img.shields.io/npm/v/@roodriigoooo/pi-huff.svg)](https://www.npmjs.com/package/@roodriigoooo/pi-huff)
+
 `huff` = hunk + diff. A pi extension that replaces pi's default `write` and `edit` tool output with Shiki-highlighted, word-emphasised terminal diffs, and adds a read-only bridge so a human can review those changes in a live [Hunk](https://github.com/hunk) session and feed their inline notes back to the agent.
 
 ## Two halves

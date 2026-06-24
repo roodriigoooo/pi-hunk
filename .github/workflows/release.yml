@@ -1,25 +1,107 @@
-name: Release to npm
+name: Release
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version without v prefix. Defaults to package.json version."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
+          node-version: 24
+          cache: npm
 
-      - name: Publish
-        run: npm publish --access public --provenance
+      - name: Install package dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Install pi runtime for checks
+        run: npm install -g @earendil-works/pi-coding-agent
+
+      - name: Resolve pi root
+        id: piroot
+        run: echo "path=$(npm root -g)/@earendil-works/pi-coding-agent" >> "$GITHUB_OUTPUT"
+
+      - name: Run checks
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PI_CODING_AGENT_ROOT: ${{ steps.piroot.outputs.path }}
+        run: npm run check
+
+      - name: Resolve release version
+        id: version
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          if [ "${{ github.event_name }}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            INPUT_VERSION="${{ inputs.version }}"
+            VERSION="${INPUT_VERSION:-$PACKAGE_VERSION}"
+            TAG="v$VERSION"
+          fi
+          if [ -z "$VERSION" ]; then
+            echo "Release version is empty" >&2
+            exit 1
+          fi
+          if [ "$VERSION" != "$PACKAGE_VERSION" ]; then
+            echo "Release version v$VERSION does not match package.json v$PACKAGE_VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Check npm package version
+        id: npm
+        run: |
+          PACKAGE_NAME=$(node -p "require('./package.json').name")
+          VERSION="${{ steps.version.outputs.version }}"
+          if npm view "$PACKAGE_NAME@$VERSION" version >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$PACKAGE_NAME@$VERSION already published"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish npm package
+        if: steps.npm.outputs.published != 'true'
+        run: npm publish --access public --provenance
+
+      - name: Pack npm artifact
+        run: npm pack
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists" >&2
+            exit 1
+          fi
+          NOTES_FILE="docs/releases/${{ steps.version.outputs.version }}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES_FILE")
+          else
+            NOTES_ARGS=(--notes "pi-huff $TAG")
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            gh release create "$TAG" ./*.tgz --target "$GITHUB_SHA" --title "pi-huff $TAG" "${NOTES_ARGS[@]}"
+          else
+            gh release create "$TAG" ./*.tgz --title "pi-huff $TAG" "${NOTES_ARGS[@]}"
+          fi
