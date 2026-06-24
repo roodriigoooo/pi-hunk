@@ -1,6 +1,6 @@
 {
   "name": "@roodriigoooo/pi-huff",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Configurable Shiki terminal diffs and read-only Hunk review notes for pi.",
   "type": "module",
   "license": "MIT",
