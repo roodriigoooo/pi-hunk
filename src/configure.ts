@@ -92,6 +92,13 @@ type ConfigSpec = {
 	describe?: (value: string, config: HuffConfig, theme: Theme) => string;
 };
 
+type ConfigGroup = {
+	id: string;
+	label: string;
+	description: string;
+	specs: ConfigSpec[];
+};
+
 function normalizeHex(value: string): string {
 	const hex = value.startsWith("#") ? value : `#${value}`;
 	return hex.toLowerCase();
@@ -192,55 +199,24 @@ function swatch(ref: string, fallbackSlot: string, theme: Theme, label: string):
 	return `${ansi}●${ANSI_RESET} ${label}`;
 }
 
+/** Per-slot color choices: auto (follow role) + six UI-semantic colors + freeform hex.
+ *  Cross-role diff colors and theme-slot duplicates are intentionally omitted —
+ *  `auto` already follows the role, and custom hex covers anything else. */
 function colorChoices(slot: keyof ColorSlots, theme: Theme): Choice[] {
 	const fallback = COLOR_FALLBACKS[slot];
 	const autoDescription = slot === "gutter" ? "Follow the current row side: add, remove, or context." : `Follow pi theme slot ${fallback}.`;
-	const aliases: Choice[] = [
-		{ value: "auto", label: swatch("auto", fallback, theme, "auto"), description: autoDescription },
-		{ value: "green", label: swatch("green", fallback, theme, "green"), description: "Alias for pi's addition color." },
-		{ value: "red", label: swatch("red", fallback, theme, "red"), description: "Alias for pi's removal color." },
-		{ value: "gray", label: swatch("gray", fallback, theme, "gray"), description: "Alias for diff context text; readable neutral." },
-		{ value: "muted", label: swatch("muted", fallback, theme, "muted"), description: "Secondary UI text; calmer than gray." },
-		{ value: "dim", label: swatch("dim", fallback, theme, "dim"), description: "Tertiary UI text; lowest contrast." },
-		{ value: "accent", label: swatch("accent", fallback, theme, "accent"), description: "Primary pi accent color." },
-		{ value: "title", label: swatch("title", fallback, theme, "title"), description: "Tool title color." },
-		{ value: "warning", label: swatch("warning", fallback, theme, "warning"), description: "Warning/yellow emphasis." },
-		{ value: "error", label: swatch("error", fallback, theme, "error"), description: "Error/red emphasis." },
+	const semantic: Array<[string, string]> = [
+		["accent", "Primary pi accent color."],
+		["muted", "Secondary UI text; calm neutral."],
+		["dim", "Tertiary UI text; lowest contrast."],
+		["title", "Tool title foreground."],
+		["warning", "Warning/yellow emphasis."],
+		["error", "Error/red emphasis."],
 	];
-	const themeSlots: Choice[] = [
-		["theme:toolDiffAdded", "theme added", "Exact pi diff addition slot."],
-		["theme:toolDiffRemoved", "theme removed", "Exact pi diff removal slot."],
-		["theme:toolDiffContext", "theme context", "Exact pi diff context slot."],
-		["theme:toolTitle", "theme title", "Tool title foreground."],
-		["theme:accent", "theme accent", "Current pi accent."],
-		["theme:muted", "theme muted", "Current pi muted text."],
-		["theme:dim", "theme dim", "Current pi dim text."],
-		["theme:warning", "theme warning", "Current pi warning color."],
-		["theme:error", "theme error", "Current pi error color."],
-		["theme:borderMuted", "theme border", "Muted border color."],
-	].map(([value, label, description]) => ({ value, label: swatch(value, fallback, theme, label), description }));
-	const hexes: Choice[] = [
-		["#80dc78", "mint", "Soft green, good for additions."],
-		["#ff6b6b", "coral", "Warm red, good for removals."],
-		["#61afef", "sky", "Cool blue accent."],
-		["#c678dd", "violet", "Vivid violet accent."],
-		["#e5c07b", "gold", "Warm amber metadata."],
-		["#56b6c2", "cyan", "Cool cyan marker."],
-		["#abb2bf", "stone", "Readable neutral foreground."],
-		["#7f849c", "slate", "Muted neutral foreground."],
-		["#f5c2e7", "rose", "Soft pink highlight."],
-		["#a6e3a1", "sage", "Pastel green highlight."],
-	].map(([value, name, description]) => ({ value, label: swatch(value, fallback, theme, `${name} · ${value}`), description }));
-	return uniqueChoices([...aliases, ...themeSlots, ...hexes]);
-}
-
-function uniqueChoices(choices: Choice[]): Choice[] {
-	const seen = new Set<string>();
-	return choices.filter((choice) => {
-		if (seen.has(choice.value)) return false;
-		seen.add(choice.value);
-		return true;
-	});
+	return [
+		{ value: "auto", label: swatch("auto", fallback, theme, "auto"), description: autoDescription },
+		...semantic.map(([value, description]) => ({ value, label: swatch(value, fallback, theme, value), description })),
+	];
 }
 
 function choiceDescription(choices: Choice[], value: string): string | undefined {
@@ -387,36 +363,86 @@ class ChoicePicker implements Component {
 	}
 }
 
-function huffConfigSpecs(): ConfigSpec[] {
+/** All config specs grouped by what the user sees, not by config key. */
+function huffConfigGroups(): ConfigGroup[] {
 	return [
-		boolSpec("enabled", "renderer · enabled", (c) => c.enabled, (c, v) => (c.enabled = v), "Turn Huff diff rendering on/off."),
-		choiceSpec("diffTheme", "theme · diff mode", DIFF_MODE_CHOICES, (c) => c.diffTheme, (c, v) => (c.diffTheme = v as any)),
-		choiceSpec("shikiDarkTheme", "theme · shiki dark", () => shikiThemeChoices("dark"), (c) => c.shikiDarkTheme, (c, v) => (c.shikiDarkTheme = v), "Enter opens bundled dark Shiki themes."),
-		choiceSpec("shikiLightTheme", "theme · shiki light", () => shikiThemeChoices("light"), (c) => c.shikiLightTheme, (c, v) => (c.shikiLightTheme = v), "Enter opens bundled light Shiki themes."),
-		choiceSpec("header", "layout · header", HEADER_CHOICES, (c) => c.header, (c, v) => (c.header = v as any)),
-		choiceSpec("lineNumbers", "layout · line numbers", LINE_NUMBER_CHOICES, (c) => String(c.lineNumbers), (c, v) => (c.lineNumbers = v === "true" ? true : v === "false" ? false : "changed")),
-		boolSpec("compactUnchanged", "layout · compact unchanged", (c) => c.compactUnchanged, (c, v) => (c.compactUnchanged = v), "Fold unchanged regions around edits."),
-		boolSpec("showHunkHint", "layout · hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /huff send hint when a live Hunk session exists."),
-		choiceSpec("lineHighlight", "lines · highlight", LINE_HIGHLIGHT_CHOICES, (c) => c.lineHighlight, (c, v) => (c.lineHighlight = v as any)),
-		choiceSpec("wordHighlight", "words · highlight", WORD_HIGHLIGHT_CHOICES, (c) => c.wordHighlight, (c, v) => (c.wordHighlight = v as any)),
-		colorSpec("colors.add", "colors · add", "add"),
-		colorSpec("colors.remove", "colors · remove", "remove"),
-		colorSpec("colors.context", "colors · context", "context"),
-		colorSpec("colors.meta", "colors · meta", "meta"),
-		colorSpec("colors.header", "colors · header", "header"),
-		colorSpec("colors.gutter", "colors · gutter", "gutter"),
-		colorSpec("colors.lineNo", "colors · line no", "lineNo"),
-		symbolSpec("symbols.add", "symbols · add", "add"),
-		symbolSpec("symbols.remove", "symbols · remove", "remove"),
-		symbolSpec("symbols.context", "symbols · context", "context"),
-		symbolSpec("symbols.fold", "symbols · fold", "fold"),
-		symbolSpec("symbols.gutter", "symbols · gutter", "gutter"),
-		numSpec("maxRenderedLines", "limits · max rows", ["12", "24", "60", "120", "260", "500", "1000"], (c) => c.maxRenderedLines, (c, v) => (c.maxRenderedLines = v), "Maximum rendered diff rows before truncation."),
-		numSpec("contextRadius", "limits · context radius", ["2", "3", "6", "10"], (c) => c.contextRadius, (c, v) => (c.contextRadius = v), "Unchanged lines kept around each change when compaction is on."),
-		boolSpec("hunk.enabled", "hunk · enabled", (c) => c.hunk.enabled, (c, v) => (c.hunk.enabled = v), "Enable read-only Hunk session integration."),
-		boolSpec("hunk.reviewTool", "hunk · review tool", (c) => c.hunk.reviewTool, (c, v) => (c.hunk.reviewTool = v), "Expose huff_review_notes to the model."),
-		boolSpec("hunk.autoReviewNotes", "hunk · auto pickup", (c) => c.hunk.autoReviewNotes, (c, v) => (c.hunk.autoReviewNotes = v), "Inject new human notes before agent turns."),
-		numSpec("hunk.autoReviewNotesMin", "hunk · auto min notes", ["1", "2", "3", "5"], (c) => c.hunk.autoReviewNotesMin, (c, v) => (c.hunk.autoReviewNotesMin = v), "Minimum user notes required for automatic pickup."),
+		{
+			id: "words",
+			label: "Side colors & words",
+			description: "Word emphasis style and add/remove/context colors.",
+			specs: [
+				choiceSpec("wordHighlight", "word emphasis", WORD_HIGHLIGHT_CHOICES, (c) => c.wordHighlight, (c, v) => (c.wordHighlight = v as any)),
+				colorSpec("colors.add", "add color", "add"),
+				colorSpec("colors.remove", "remove color", "remove"),
+				colorSpec("colors.context", "context color", "context"),
+			],
+		},
+		{
+			id: "rail",
+			label: "Change rail",
+			description: "Left-edge markers: line highlight, gutter, add/remove signs.",
+			specs: [
+				choiceSpec("lineHighlight", "line marker", LINE_HIGHLIGHT_CHOICES, (c) => c.lineHighlight, (c, v) => (c.lineHighlight = v as any)),
+				colorSpec("colors.gutter", "gutter color", "gutter"),
+				symbolSpec("symbols.gutter", "gutter glyph", "gutter"),
+				symbolSpec("symbols.add", "add sign", "add"),
+				symbolSpec("symbols.remove", "remove sign", "remove"),
+			],
+		},
+		{
+			id: "header",
+			label: "Header & line numbers",
+			description: "File header style, line numbers, and chrome colors.",
+			specs: [
+				choiceSpec("header", "header style", HEADER_CHOICES, (c) => c.header, (c, v) => (c.header = v as any)),
+				choiceSpec("lineNumbers", "line numbers", LINE_NUMBER_CHOICES, (c) => String(c.lineNumbers), (c, v) => (c.lineNumbers = v === "true" ? true : v === "false" ? false : "changed")),
+				colorSpec("colors.header", "header color", "header"),
+				colorSpec("colors.lineNo", "line number color", "lineNo"),
+				colorSpec("colors.meta", "meta color", "meta"),
+			],
+		},
+		{
+			id: "symbols",
+			label: "Symbols",
+			description: "Glyphs for context and folded rows.",
+			specs: [
+				symbolSpec("symbols.context", "context glyph", "context"),
+				symbolSpec("symbols.fold", "fold glyph", "fold"),
+			],
+		},
+		{
+			id: "folding",
+			label: "Folding & limits",
+			description: "Compact unchanged regions, context radius, max rows.",
+			specs: [
+				boolSpec("compactUnchanged", "compact unchanged", (c) => c.compactUnchanged, (c, v) => (c.compactUnchanged = v), "Fold unchanged regions around edits."),
+				numSpec("contextRadius", "context radius", ["2", "3", "6", "10"], (c) => c.contextRadius, (c, v) => (c.contextRadius = v), "Unchanged lines kept around each change when compaction is on."),
+				numSpec("maxRenderedLines", "max rows", ["12", "24", "60", "120", "260", "500", "1000"], (c) => c.maxRenderedLines, (c, v) => (c.maxRenderedLines = v), "Maximum rendered diff rows before truncation."),
+			],
+		},
+		{
+			id: "shiki",
+			label: "Shiki theme",
+			description: "Dark/light Shiki themes and auto mode.",
+			specs: [
+				choiceSpec("diffTheme", "diff mode", DIFF_MODE_CHOICES, (c) => c.diffTheme, (c, v) => (c.diffTheme = v as any)),
+				choiceSpec("shikiDarkTheme", "dark theme", () => shikiThemeChoices("dark"), (c) => c.shikiDarkTheme, (c, v) => (c.shikiDarkTheme = v), "Enter opens bundled dark Shiki themes."),
+				choiceSpec("shikiLightTheme", "light theme", () => shikiThemeChoices("light"), (c) => c.shikiLightTheme, (c, v) => (c.shikiLightTheme = v), "Enter opens bundled light Shiki themes."),
+			],
+		},
+		{
+			id: "bridge",
+			label: "Renderer & Hunk bridge",
+			description: "Master toggle, hunk hint, and read-only Hunk integration.",
+			specs: [
+				boolSpec("enabled", "renderer", (c) => c.enabled, (c, v) => (c.enabled = v), "Turn Huff diff rendering on/off."),
+				boolSpec("showHunkHint", "hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /huff send hint when a live Hunk session exists."),
+				boolSpec("hunk.enabled", "hunk bridge", (c) => c.hunk.enabled, (c, v) => (c.hunk.enabled = v), "Enable read-only Hunk session integration."),
+				boolSpec("hunk.reviewTool", "review tool", (c) => c.hunk.reviewTool, (c, v) => (c.hunk.reviewTool = v), "Expose huff_review_notes to the model."),
+				boolSpec("hunk.autoReviewNotes", "auto pickup", (c) => c.hunk.autoReviewNotes, (c, v) => (c.hunk.autoReviewNotes = v), "Inject new human notes before agent turns."),
+				numSpec("hunk.autoReviewNotesMin", "auto min notes", ["1", "2", "3", "5"], (c) => c.hunk.autoReviewNotesMin, (c, v) => (c.hunk.autoReviewNotesMin = v), "Minimum user notes required for automatic pickup."),
+			],
+		},
 	];
 }
 
@@ -454,7 +480,9 @@ function resolveSettingsListTheme(theme: Theme): SettingsListTheme {
 	}
 }
 
-/** Open the `/huff configure` live-preview TUI. Esc saves to `.pi/huff.json`. */
+/** Open the `/huff configure` live-preview TUI. Two-level nav: group list →
+ *  per-group settings. Esc inside a group returns to the group list; Esc on the
+ *  group list saves to `.pi/huff.json` and closes. */
 export async function openHuffConfig(
 	ctx: ExtensionCommandContext,
 	getConfig: () => HuffConfig,
@@ -466,9 +494,11 @@ export async function openHuffConfig(
 		return;
 	}
 	const draft = cloneConfig(getConfig());
-	const specs = huffConfigSpecs();
+	const groups = huffConfigGroups();
 	let theme = ctx.ui.theme;
 	let requestPreviewRender: (() => void) | undefined;
+	let closeDone: ((value?: void) => void) | undefined;
+
 	function buildPreview(): Component {
 		if (!draft.enabled) {
 			return new StaticLines(() => [
@@ -489,54 +519,68 @@ export async function openHuffConfig(
 	}
 
 	let preview = buildPreview();
-
 	function rebuildPreview() {
 		preview = buildPreview();
 	}
 
-	const items: SettingItem[] = specs.map((spec) => {
-		const item: SettingItem = {
-			id: spec.id,
-			label: spec.label,
-			currentValue: spec.get(draft),
-			description: descriptionForSpec(spec, draft, theme),
-		};
-		item.submenu = (currentValue, done) =>
-			new ChoicePicker(spec.label, choicesForSpec(spec, draft, theme), theme, done, currentValue, spec.id.startsWith("colors."), (value) => {
-				spec.set(draft, value);
-				item.currentValue = spec.get(draft);
-				item.description = descriptionForSpec(spec, draft, theme);
-				rebuildPreview();
-			});
-		return item;
-	});
-
 	const settingsTheme = resolveSettingsListTheme(theme);
-	let closeDone: ((value?: void) => void) | undefined;
-	const settingsList = new SettingsList(
-		items,
-		Math.min(items.length, 8),
-		settingsTheme,
-		(id, newValue) => {
-			const spec = specs.find((s) => s.id === id);
-			if (!spec) return;
-			spec.set(draft, newValue);
-			const item = items.find((i) => i.id === id);
-			if (item) {
-				item.currentValue = spec.get(draft);
-				item.description = descriptionForSpec(spec, draft, theme);
-			}
-			rebuildPreview();
-		},
-		() => {
-			saveProjectHuffConfig(ctx.cwd, draft)
-				.then(() => applyConfig(draft))
-				.then(() => ctx.ui.notify("Saved Huff config to .pi/huff.json.", "info"))
-				.catch((error) => ctx.ui.notify(`Failed to save Huff config: ${String(error)}`, "error"))
-				.finally(() => closeDone?.());
-		},
-		{ enableSearch: true },
+
+	let currentGroup = -1;
+
+	const groupNav = new SelectList(
+		groups.map((g, i) => ({ value: String(i), label: g.label, description: g.description })),
+		Math.min(groups.length, 8),
+		selectListThemeFromUi(theme),
 	);
+	groupNav.onSelect = (item) => {
+		currentGroup = Number(item.value);
+	};
+	groupNav.onCancel = () => {
+		saveProjectHuffConfig(ctx.cwd, draft)
+			.then(() => applyConfig(draft))
+			.then(() => ctx.ui.notify("Saved Huff config to .pi/huff.json.", "info"))
+			.catch((error) => ctx.ui.notify(`Failed to save Huff config: ${String(error)}`, "error"))
+			.finally(() => closeDone?.());
+	};
+
+	const groupLists = groups.map((group) => {
+		const items: SettingItem[] = group.specs.map((spec) => {
+			const item: SettingItem = {
+				id: spec.id,
+				label: spec.label,
+				currentValue: spec.get(draft),
+				description: descriptionForSpec(spec, draft, theme),
+			};
+			item.submenu = (currentValue, done) =>
+				new ChoicePicker(spec.label, choicesForSpec(spec, draft, theme), theme, done, currentValue, spec.id.startsWith("colors."), (value) => {
+					spec.set(draft, value);
+					item.currentValue = spec.get(draft);
+					item.description = descriptionForSpec(spec, draft, theme);
+					rebuildPreview();
+				});
+			return item;
+		});
+		return new SettingsList(
+			items,
+			Math.min(items.length, 8),
+			settingsTheme,
+			(id, newValue) => {
+				const spec = group.specs.find((s) => s.id === id);
+				if (!spec) return;
+				spec.set(draft, newValue);
+				const item = items.find((i) => i.id === id);
+				if (item) {
+					item.currentValue = spec.get(draft);
+					item.description = descriptionForSpec(spec, draft, theme);
+				}
+				rebuildPreview();
+			},
+			() => {
+				currentGroup = -1;
+			},
+			{ enableSearch: true },
+		);
+	});
 
 	await ctx.ui.custom<void>((tui, nextTheme, _kb, done) => {
 		theme = nextTheme;
@@ -550,20 +594,33 @@ export async function openHuffConfig(
 			render(width: number): string[] {
 				const out: string[] = [];
 				out.push(`${theme.fg("accent", theme.bold("Huff Configuration"))} ${theme.fg("dim", "· live Shiki preview")}`);
-				out.push(theme.fg("dim", "Enter/Space opens picker · type filters settings · Esc saves project config"));
+				if (currentGroup === -1) {
+					out.push(theme.fg("dim", "Enter opens group · Esc saves & closes"));
+				} else {
+					out.push(`${theme.fg("dim", "Esc back to groups")} ${theme.fg("dim", "·")} ${theme.fg("muted", groups[currentGroup].label)}`);
+				}
 				out.push("");
-				out.push(...settingsList.render(width));
+				if (currentGroup === -1) {
+					out.push(...groupNav.render(width));
+				} else {
+					out.push(...groupLists[currentGroup].render(width));
+				}
 				out.push("");
 				out.push(`${theme.fg("accent", "✦")} ${theme.fg("toolTitle", theme.bold("Preview"))}`);
 				out.push(...preview.render(Math.max(40, width)));
 				return out;
 			},
 			invalidate() {
-				settingsList.invalidate();
+				groupNav.invalidate();
+				groupLists.forEach((g) => g.invalidate());
 				preview.invalidate();
 			},
 			handleInput(data: string) {
-				settingsList.handleInput(data);
+				if (currentGroup === -1) {
+					groupNav.handleInput(data);
+				} else {
+					groupLists[currentGroup].handleInput(data);
+				}
 				tui.requestRender();
 			},
 		};

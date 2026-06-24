@@ -172,14 +172,16 @@ process.exit(2);
 		setStatus: (key, text) => statuses.set(key, text),
 		custom: async (factory) => {
 			const comp = factory({ requestRender() {} }, fakeTheme(), {}, () => {});
-			if (comp && typeof comp.render === "function") {
-				configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
-				comp.handleInput?.("\r");
-				configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
-				comp.handleInput?.("\x1b[B");
-				configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
-				comp.handleInput?.("\x1b");
-			}
+		if (comp && typeof comp.render === "function") {
+			configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
+			comp.handleInput?.("\r");
+			configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
+			comp.handleInput?.("\r");
+			configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
+			comp.handleInput?.("\x1b[B");
+			configureSnapshots.push(stripAnsi(comp.render(100).join("\n")));
+			comp.handleInput?.("\x1b");
+		}
 			return undefined;
 		},
 		theme: fakeTheme(),
@@ -309,7 +311,10 @@ process.exit(2);
 	assert.equal(finalFile, await readFile(path.join(tmp, "smoke.ts"), "utf8"), "hello huff\n");
 
 	await commands.get("huff").handler("configure", ctx);
-	assert.ok(configureSnapshots.some((snapshot) => /↑↓ move · Enter select/.test(snapshot)), "configure enter opens a picker instead of cycling");
+	assert.ok(configureSnapshots[0].includes("Huff Configuration"), "configure opens with title");
+	assert.ok(configureSnapshots[0].includes("Side colors & words"), "configure shows group nav");
+	assert.ok(configureSnapshots[1].includes("word emphasis"), "enter descends into a group showing its settings");
+	assert.ok(configureSnapshots.some((snapshot) => /↑↓ move · Enter select/.test(snapshot)), "second enter opens a picker inside the group");
 
 	console.log("pi-huff smoke ok");
 } finally {
