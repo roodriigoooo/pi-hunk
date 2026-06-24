@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createHighlighter } from "shiki";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -39,7 +40,7 @@ const jiti = createJiti(import.meta.url, {
 });
 
 const { parseUnifiedPatch, renderDiffLines } = await jiti.import(path.join(repoRoot, "src", "diff-view.ts"), { default: false });
-const { DEFAULT_CONFIG } = await jiti.import(path.join(repoRoot, "src", "config.ts"), { default: false });
+const { DEFAULT_CONFIG, ansiFg } = await jiti.import(path.join(repoRoot, "src", "config.ts"), { default: false });
 const { normalizeHunkComments } = await jiti.import(path.join(repoRoot, "src", "hunk-bridge.ts"), { default: false });
 
 function fakeTheme() {
@@ -69,8 +70,8 @@ function fakeTheme() {
 }
 
 const fakeHighlighter = {
-	codeToTokensBase(line) {
-		return [[{ content: line, color: "#ffffff" }]];
+	codeToTokensBase(code) {
+		return code.split("\n").map((line) => [{ content: line, color: "#ffffff" }]);
 	},
 };
 
@@ -157,5 +158,105 @@ assert.equal(altFields[0].filePath, "c.ts");
 assert.equal(altFields[0].oldLine, 7);
 assert.equal(altFields[0].summary, "alt shape");
 assert.equal(altFields[0].author, "human");
+
+// --- whole-hunk grammar state: template-literal continuation line -----------
+
+// A template literal spans two lines. The second line ("   world`;") is a
+// context line that lives *inside* the template literal. Per-line tokenization
+// loses that context and colors "world" as a bare identifier; whole-hunk
+// tokenization colors it as template-string content. This locks in the fix.
+{
+	const highlighter = await createHighlighter({ themes: ["github-dark"], langs: ["typescript"] });
+	const tsPatch = [
+		"--- a/code.ts",
+		"+++ b/code.ts",
+		"@@ -1,4 +1,4 @@",
+		" const a = 1;",
+		"-const msg = `hello ${name}",
+		"+const msg = `hi ${name}",
+		"   world`;",
+		" const b = 2;",
+	].join("\n");
+
+	// Ground truth: tokenize the full new side and read the "world" token color.
+	// Contrast: tokenize the world line in isolation (what per-line rendering does).
+	// The fix means the rendered "world" must carry the full-side (template-string)
+	// color, NOT the isolated-identifier color.
+	const fullNew = ["const a = 1;", "const msg = `hi ${name}", "   world`;", "const b = 2;"].join("\n");
+	const fullTokens = highlighter.codeToTokensBase(fullNew, { lang: "typescript", theme: "github-dark" });
+	const worldToken = fullTokens[2].find((t) => t.content.includes("world"));
+	assert.ok(worldToken, "world token found in full tokenize");
+	const expectedAnsi = ansiFg(worldToken.color);
+	assert.ok(expectedAnsi, "expected template-string color resolves to ANSI");
+
+	const isoTokens = highlighter.codeToTokensBase("   world`;", { lang: "typescript", theme: "github-dark" });
+	const isoWorldToken = isoTokens[0].find((t) => t.content.includes("world"));
+	assert.ok(isoWorldToken, "world token found in isolated tokenize");
+	const isolatedAnsi = ansiFg(isoWorldToken.color);
+	assert.notEqual(expectedAnsi, isolatedAnsi, "fixture is meaningful: full vs isolated world colors differ");
+
+	const rendered = renderDiffLines({
+		patch: tsPatch,
+		filePath: "code.ts",
+		cwd: repoRoot,
+		title: "unit",
+		config: { ...DEFAULT_CONFIG, wordHighlight: "none", lineHighlight: "none", lineNumbers: false, header: "minimal", compactUnchanged: false },
+		highlighter,
+		theme: fakeTheme(),
+		liveSession: false,
+	});
+	const worldLine = rendered.find((line) => stripAnsi(line).includes("world"));
+	assert.ok(worldLine, "world continuation line rendered");
+	assert.ok(worldLine.includes(expectedAnsi), `continuation line carries template-string color ${expectedAnsi}`);
+	assert.ok(!worldLine.includes(isolatedAnsi), `continuation line does not carry isolated-identifier color ${isolatedAnsi}; got: ${JSON.stringify(worldLine)}`);
+	await highlighter.dispose();
+}
+
+// --- word-emphasis indexing across astral code points (Q4) ------------------
+
+// diffWordsWithSpace emits UTF-16-code-unit ranges; the renderer advances its
+// cursor by each code point's UTF-16 length. An astral emoji is 2 units, so a
+// range ending at the emoji must NOT bleed emphasis onto the following char.
+// This locks that alignment: the emoji is counted as 2, the trailing char as 3.
+{
+	const emojiPatch = [
+		"--- a/e.ts",
+		"+++ b/e.ts",
+		"@@ -1,1 +1,1 @@",
+		"-a c",
+		"+a🎉c",
+	].join("\n");
+	const rendered = renderDiffLines({
+		patch: emojiPatch,
+		filePath: "e.ts",
+		cwd: repoRoot,
+		title: "unit",
+		config: { ...DEFAULT_CONFIG, wordHighlight: "bold", lineHighlight: "none", lineNumbers: false, header: "minimal", compactUnchanged: false },
+		highlighter: fakeHighlighter,
+		theme: fakeTheme(),
+		liveSession: false,
+	});
+	const added = rendered.find((line) => stripAnsi(line).includes("🎉"));
+	assert.ok(added, "emoji added line rendered");
+	const boldCount = (added.match(/\x1b\[1m/g) ?? []).length;
+	assert.equal(boldCount, 1, `exactly the emoji is bold, not the trailing char; got ${boldCount} bold runs in ${JSON.stringify(added)}`);
+	assert.ok(added.indexOf("\x1b[1m") < added.indexOf("🎉"), "bold run precedes the emoji, not the trailing char");
+
+	// CJK is BMP (1 unit per char) — the changed char is emphasized, its neighbor is not.
+	const cjkPatch = "--- a/c.ts\n+++ b/c.ts\n@@ -1,1 +1,1 @@\n-a c\n+a巴c";
+	const cjkRendered = renderDiffLines({
+		patch: cjkPatch,
+		filePath: "c.ts",
+		cwd: repoRoot,
+		title: "unit",
+		config: { ...DEFAULT_CONFIG, wordHighlight: "bold", lineHighlight: "none", lineNumbers: false, header: "minimal", compactUnchanged: false },
+		highlighter: fakeHighlighter,
+		theme: fakeTheme(),
+		liveSession: false,
+	});
+	const cjkAdded = cjkRendered.find((line) => stripAnsi(line).includes("巴"));
+	assert.ok(cjkAdded, "cjk added line rendered");
+	assert.equal((cjkAdded.match(/\x1b\[1m/g) ?? []).length, 1, "exactly the changed CJK char is bold");
+}
 
 console.log("pi-huff units ok");

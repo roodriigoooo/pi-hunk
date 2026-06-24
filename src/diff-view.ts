@@ -180,6 +180,61 @@ function filteredHunkLines(hunk: ParsedHunk, config: HuffConfig): Array<DiffLine
 }
 
 // ============================================================================
+// Hunk tokenization — whole-side, grammar state carried across lines
+// ============================================================================
+
+type ShikiTokenLine = ReturnType<Highlighter["codeToTokensBase"]>[number];
+
+/** Tokenize each side of a hunk as one string so multi-line constructs (template
+ *  literals, block comments, JSX, triple-quoted strings) keep their grammar
+ *  state across continuation lines. Returns undefined when there is no
+ *  highlighter or tokenization fails; the renderer then falls back to plain. */
+function tokenizeHunkSides(
+	hunk: ParsedHunk,
+	highlighter: Highlighter | undefined,
+	lang: string,
+	shikiTheme: string,
+): { oldTokens: ShikiTokenLine[]; newTokens: ShikiTokenLine[] } | undefined {
+	if (!highlighter) return undefined;
+	try {
+		const oldLines: string[] = [];
+		const newLines: string[] = [];
+		for (const line of hunk.lines) {
+			if (line.kind === "context") {
+				oldLines.push(line.text);
+				newLines.push(line.text);
+			} else if (line.kind === "remove") {
+				oldLines.push(line.text);
+			} else if (line.kind === "add") {
+				newLines.push(line.text);
+			}
+		}
+		const oldTokens = highlighter.codeToTokensBase(oldLines.join("\n") || " ", { lang, theme: shikiTheme });
+		const newTokens = highlighter.codeToTokensBase(newLines.join("\n") || " ", { lang, theme: shikiTheme });
+		return { oldTokens, newTokens };
+	} catch {
+		return undefined;
+	}
+}
+
+/** Pick the pre-tokenized token line for a rendered diff line.
+ *  Remove lines index into the old side; add and context into the new side
+ *  (context is identical text; the new side matches the file's final form). */
+function tokensForLine(
+	line: DiffLine,
+	hunk: ParsedHunk,
+	sides: { oldTokens: ShikiTokenLine[]; newTokens: ShikiTokenLine[] } | undefined,
+): ShikiTokenLine | undefined {
+	if (!sides) return undefined;
+	if (line.kind === "remove") {
+		const idx = line.oldLine !== undefined ? line.oldLine - hunk.oldStart : -1;
+		return idx >= 0 && idx < sides.oldTokens.length ? sides.oldTokens[idx] : undefined;
+	}
+	const idx = line.newLine !== undefined ? line.newLine - hunk.newStart : -1;
+	return idx >= 0 && idx < sides.newTokens.length ? sides.newTokens[idx] : undefined;
+}
+
+// ============================================================================
 // Token styling
 // ============================================================================
 
@@ -213,19 +268,15 @@ function styleToken(text: string, color: string | undefined, emph: boolean, side
 
 function renderCodeLine(
 	line: string,
-	lang: string,
-	shikiTheme: string,
-	highlighter: Highlighter | undefined,
+	tokens: ShikiTokenLine | undefined,
 	theme: Theme,
 	config: HuffConfig,
 	side: DiffSide,
 	ranges: Range[],
 	sideAnsi: string,
 ): string {
-	if (!highlighter) return sideAnsi + line + ANSI_RESET;
+	if (!tokens) return sideAnsi + line + ANSI_RESET;
 	try {
-		const tokenLines = highlighter.codeToTokensBase(line || " ", { lang, theme: shikiTheme });
-		const tokens = tokenLines[0] ?? [];
 		let out = sideAnsi;
 		let cursor = 0;
 		for (const token of tokens) {
@@ -314,6 +365,7 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 			truncated = true;
 			break;
 		}
+		const sides = tokenizeHunkSides(hunk, highlighter, lang, shikiTheme);
 		lines.push(hunkCaption(hunk, filePath, cwd, theme));
 		rendered++;
 		for (const item of filteredHunkLines(hunk, config)) {
@@ -344,7 +396,8 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 			const nums = lineNoMode ? lineNoText(item, palette, lineNoMode) + " " : "";
 			const ranges = config.wordHighlight !== "none" ? (item.kind === "add" ? item.addRanges ?? [] : item.kind === "remove" ? item.removeRanges ?? [] : []) : [];
 			const lineAnsi = changed && config.lineHighlight === "tint" ? `${tintBgAnsi(side)}${sideAnsi}` : sideAnsi;
-			const code = renderCodeLine(item.text, lang, shikiTheme, highlighter, theme, config, side, ranges, lineAnsi);
+			const tokens = tokensForLine(item, hunk, sides);
+			const code = renderCodeLine(item.text, tokens, theme, config, side, ranges, lineAnsi);
 			lines.push(`${marker} ${nums}${signStyled} ${code}`);
 			rendered++;
 		}
