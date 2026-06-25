@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
-import type { HuffConfig } from "./config";
+import type { HunkConfig } from "./config";
 import { parseUnifiedPatch, type ParsedPatch } from "./diff-view";
 import { displayPath, fileKey } from "./paths";
 
@@ -33,7 +33,7 @@ export type ReviewNotesResult = {
 // Hunk CLI exec
 // ============================================================================
 
-async function huffExec(cwd: string, command: string, args: string[], timeout = 20_000, signal?: AbortSignal): Promise<HunkExecResult> {
+async function hunkExec(cwd: string, command: string, args: string[], timeout = 20_000, signal?: AbortSignal): Promise<HunkExecResult> {
 	return await new Promise<HunkExecResult>((resolve) => {
 		const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
@@ -60,8 +60,8 @@ async function huffExec(cwd: string, command: string, args: string[], timeout = 
 	});
 }
 
-async function runHunkJson(cwd: string, args: string[], config: HuffConfig, timeout = 20_000, signal?: AbortSignal): Promise<any | undefined> {
-	const execResult = await huffExec(cwd, config.hunk.binary, args, timeout, signal);
+async function runHunkJson(cwd: string, args: string[], config: HunkConfig, timeout = 20_000, signal?: AbortSignal): Promise<any | undefined> {
+	const execResult = await hunkExec(cwd, config.hunk.binary, args, timeout, signal);
 	if (execResult.code !== 0) return undefined;
 	try {
 		return JSON.parse(execResult.stdout);
@@ -185,7 +185,7 @@ function reviewNotesSignature(comments: HunkComment[], cwd: string): string {
 
 function buildReviewPrompt(comments: HunkComment[], cwd: string): string {
 	const groups = groupCommentsByFile(comments, cwd);
-	const lines: string[] = ["Human-authored Hunk review notes:"];
+	const lines: string[] = ["Open Hunk review state (human-authored notes):"];
 	let index = 1;
 	for (const [file, fileComments] of groups) {
 		lines.push(`\nFile: ${file}`);
@@ -207,35 +207,55 @@ export type RenderRecordLike = {
 	summary: string;
 };
 
-/** Line ranges a patch touches on its new side (additions + their context),
- *  as [start, end] inclusive new-line numbers. Used to correlate human notes
- *  to the edit they refer to. */
-function touchedNewLineRanges(patch: string): Array<[number, number]> {
+/** Line spans a patch touches on each side, as [start, end] inclusive line
+ *  numbers. The new side covers additions + context (newLine); the old side
+ *  covers removals + context (oldLine). Used to correlate human notes to the
+ *  edit they refer to, on whichever side the note is pinned to. */
+function touchedLineRanges(patch: string): { old: Array<[number, number]>; new: Array<[number, number]> } {
 	const parsed: ParsedPatch = parseUnifiedPatch(patch);
-	const ranges: Array<[number, number]> = [];
+	const old: Array<[number, number]> = [];
+	const neu: Array<[number, number]> = [];
 	for (const hunk of parsed.hunks) {
-		let start: number | undefined;
-		let end: number | undefined;
+		let oldStart: number | undefined;
+		let oldEnd: number | undefined;
+		let newStart: number | undefined;
+		let newEnd: number | undefined;
 		for (const line of hunk.lines) {
+			if (line.kind === "remove" || line.kind === "context") {
+				const n = line.oldLine;
+				if (n !== undefined) {
+					if (oldStart === undefined) oldStart = n;
+					oldEnd = n;
+				}
+			}
 			if (line.kind === "add" || line.kind === "context") {
 				const n = line.newLine;
-				if (n === undefined) continue;
-				if (start === undefined) start = n;
-				end = n;
+				if (n !== undefined) {
+					if (newStart === undefined) newStart = n;
+					newEnd = n;
+				}
 			}
 		}
-		if (start !== undefined && end !== undefined) ranges.push([start, end]);
+		if (oldStart !== undefined && oldEnd !== undefined) old.push([oldStart, oldEnd]);
+		if (newStart !== undefined && newEnd !== undefined) neu.push([newStart, newEnd]);
 	}
-	return ranges;
+	return { old, new: neu };
 }
 
-/** True if a note's pinned line falls inside a record's touched new-line range
- *  for the same file. Falls back to oldLine when newLine is absent. */
+function lineInRanges(line: number, ranges: Array<[number, number]>): boolean {
+	return ranges.some(([s, e]) => line >= s && line <= e);
+}
+
+/** True if a note's pinned line falls inside a record's touched span on the
+ *  side the note refers to: newLine checks the edit's new-side span, oldLine
+ *  checks the old-side span. A note carrying both is touched if either side
+ *  overlaps the same file's edit. */
 function noteOverlapsRecord(note: HunkComment, record: RenderRecordLike, cwd: string): boolean {
 	if (fileKey(note.filePath, cwd) !== fileKey(record.filePath, cwd)) return false;
-	const line = note.newLine ?? note.oldLine;
-	if (line === undefined) return false;
-	return touchedNewLineRanges(record.patch).some(([s, e]) => line >= s && line <= e);
+	const ranges = touchedLineRanges(record.patch);
+	if (note.newLine !== undefined && lineInRanges(note.newLine, ranges.new)) return true;
+	if (note.oldLine !== undefined && lineInRanges(note.oldLine, ranges.old)) return true;
+	return false;
 }
 
 /** Filter notes to those overlapping any recent edit. Pure + testable. */
@@ -252,19 +272,26 @@ export function notesRelevantToRecords(notes: HunkComment[], findRecent: (filePa
 
 export interface ReviewBridge {
 	/** Probe for a live Hunk session, returning the raw session (or undefined). */
-	probeSession(cwd: string, config: HuffConfig, signal?: AbortSignal): Promise<any | undefined>;
+	probeSession(cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<any | undefined>;
 	/** Read notes once. Does not track dedup state. */
-	readNotes(cwd: string, config: HuffConfig, signal?: AbortSignal): Promise<ReviewNotesResult>;
+	readNotes(cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<ReviewNotesResult>;
 	/**
-	 * Read notes and, if a new set meeting the auto-pickup threshold exists,
-	 * mark it for injection. Returns the result plus whether it should inject.
-	 * Duplicate unchanged sets are not re-injected.
+	 * Read notes and, if a new relevant review state exists, mark it for injection.
+	 * Returns the result plus whether it should inject. Duplicate unchanged states
+	 * are not re-injected.
 	 */
-	pickup(cwd: string, config: HuffConfig, signal?: AbortSignal): Promise<{ result: ReviewNotesResult; inject: boolean }>;
-	/** Forget the last-seen signature (e.g. after `/huff auto off`). */
+	pickup(cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<{ result: ReviewNotesResult; inject: boolean }>;
+	/** Forget the last-seen signature (e.g. after `/hunk auto off`). */
 	resetSignature(): void;
 	/** Render notes through the shared visual language. */
 	renderNotesLines(result: ReviewNotesResult | undefined, cwd: string, theme: Theme): string[];
+	/** Render read-only review state for the human-facing `/hunk review` view. */
+	renderReviewLines(
+		result: ReviewNotesResult | undefined,
+		findRecent: (filePath: string | undefined, cwd: string) => RenderRecordLike | undefined,
+		cwd: string,
+		theme: Theme,
+	): string[];
 }
 
 export function createHunkBridge(findRecent?: (filePath: string | undefined, cwd: string) => RenderRecordLike | undefined): ReviewBridge {
@@ -294,21 +321,19 @@ export function createHunkBridge(findRecent?: (filePath: string | undefined, cwd
 				live: true,
 				session,
 				comments,
-				message: comments.length ? buildReviewPrompt(comments, cwd) : "Live Hunk session found. No user Hunk comments are pending.",
+				message: comments.length ? buildReviewPrompt(comments, cwd) : "Live Hunk session found. No user Hunk comments are open.",
 			};
 		},
 
 		async pickup(cwd, config, signal) {
 			const result = await this.readNotes(cwd, config, signal);
 			if (!config.hunk.autoReviewNotes || !result.live) return { result, inject: false };
-			// Scope to notes that overlap a recent edit. The count threshold applies
-			// to the *relevant* set, so notes about untouched files never trigger
-			// pickup on their own. When no findRecent seam is wired (older callers),
-			// fall back to the legacy flat-count behavior on all notes.
+			// Scope to notes that overlap a recent edit, so notes about untouched
+			// files never trigger pickup on their own. When no findRecent seam is
+			// wired (older callers), fall back to all notes.
 			const relevant = findRecent ? notesRelevantToRecords(result.comments, findRecent, cwd) : result.comments;
 			const scoped: ReviewNotesResult = relevant.length === result.comments.length ? result : { ...result, comments: relevant, message: buildReviewPrompt(relevant, cwd) };
-			const min = Math.max(1, config.hunk.autoReviewNotesMin);
-			if (relevant.length < min) return { result: scoped, inject: false };
+			if (relevant.length < 1) return { result: scoped, inject: false };
 			const signature = reviewNotesSignature(scoped.comments, cwd);
 			if (signature === lastSignature) return { result: scoped, inject: false };
 			lastSignature = signature;
@@ -365,12 +390,12 @@ export function createHunkBridge(findRecent?: (filePath: string | undefined, cwd
 				lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
 				return lines;
 			}
-			const addressed = result.comments.filter((c) => {
+			const touched = result.comments.filter((c) => {
 				const rec = findRecent(c.filePath, cwd);
 				return rec ? noteOverlapsRecord(c, rec, cwd) : false;
 			}).length;
-			const pending = result.comments.length - addressed;
-			lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("toolDiffAdded", `${addressed} addressed`)} ${theme.fg("dim", "·")} ${theme.fg("warning", `${pending} pending`)}`);
+			const open = result.comments.length - touched;
+			lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("toolDiffAdded", `${touched} touched`)} ${theme.fg("dim", "·")} ${theme.fg("warning", `${open} open`)}`);
 			lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
 			let index = 1;
 			for (const [file, comments] of groupCommentsByFile(result.comments, cwd)) {
@@ -378,8 +403,8 @@ export function createHunkBridge(findRecent?: (filePath: string | undefined, cwd
 				for (const comment of comments) {
 					const rec = findRecent(comment.filePath, cwd);
 					const isAddressed = rec ? noteOverlapsRecord(comment, rec, cwd) : false;
-					const mark = isAddressed ? theme.fg("toolDiffAdded", "✓ addressed") : theme.fg("warning", "○ pending");
-					lines.push(`${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary} ${theme.fg("dim", "·")} ${mark}`);
+					const mark = isAddressed ? theme.fg("toolDiffAdded", "✓ touched") : theme.fg("warning", "○ open");
+					lines.push(`${theme.fg("dim", String(index).padStart(2, " "))}. ${mark} ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary}`);
 					if (comment.rationale) lines.push(`   ${theme.fg("dim", "rationale:")} ${comment.rationale}`);
 					index++;
 				}

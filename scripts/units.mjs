@@ -292,29 +292,24 @@ assert.equal(altFields[0].author, "human");
 	const fakeResult = (comments) => ({ live: true, session: { id: "s" }, comments, message: "" });
 	bridge.readNotes = async () => fakeResult([notesOnEdit, notesOffEdit]);
 
-	const config = { ...DEFAULT_CONFIG, hunk: { ...DEFAULT_CONFIG.hunk, enabled: true, autoReviewNotes: true, autoReviewNotesMin: 2 } };
+	const config = { ...DEFAULT_CONFIG, hunk: { ...DEFAULT_CONFIG.hunk, enabled: true, autoReviewNotes: true, autoReviewNotesMin: 99 } };
 
-	// Desired: only the on-edit note is relevant. With 2 notes but only 1
-	// relevant, and min=2 as a *fallback* on the relevant set, this should NOT
-	// inject (1 relevant < 2). Dropping min to 1 should inject the 1 relevant.
+	// Desired: only the on-edit note is relevant. Arbitrary count thresholds no
+	// longer gate pickup; one relevant note is enough when auto pickup is enabled.
 	const { result: r1, inject: inj1 } = await bridge.pickup(cwd, config);
-	assert.equal(inj1, false, "two notes but only one overlaps an edit, min=2 → no inject");
+	assert.equal(inj1, true, "one relevant note injects even when legacy min is high");
 	assert.equal(r1.comments.length, 1, "result carries only relevant notes");
 	assert.equal(r1.comments[0].summary, "on the edit", "the relevant note is the on-edit one");
 
-	bridge.resetSignature();
-	const configMin1 = { ...config, hunk: { ...config.hunk, autoReviewNotesMin: 1 } };
-	const { result: r2, inject: inj2 } = await bridge.pickup(cwd, configMin1);
-	assert.equal(inj2, true, "one relevant note meets min=1 → inject");
-	assert.equal(r2.comments.length, 1, "only the relevant note is injected");
-	assert.equal(r2.comments[0].summary, "on the edit");
+	const { inject: inj2 } = await bridge.pickup(cwd, config);
+	assert.equal(inj2, false, "unchanged review state is deduped");
 }
 
-// --- J: /huff review pairs notes with recent edits (read-only) -------------
+// --- J: /hunk review pairs notes with recent edits (read-only) -------------
 
 // renderReviewLines lists each human note with whether a recent edit touched
-// its line (addressed) or not (pending). It must not send anything to the
-// agent; it is a human-facing diagnostic.
+// its line or not. It must not send anything to the agent; it is a human-facing
+// diagnostic.
 {
 	const cwd = repoRoot;
 	const store = createRenderRecordStore();
@@ -341,12 +336,41 @@ assert.equal(altFields[0].author, "human");
 	assert.match(plain, /Hunk review/, "review header present");
 	assert.match(plain, /on the edit/, "on-edit note listed");
 	assert.match(plain, /untouched file/, "off-edit note listed");
-	// addressed = a recent edit overlaps the note's line; pending = no overlap.
 	const onEditIdx = lines.findIndex((l) => stripAnsi(l).includes("on the edit"));
 	const offEditIdx = lines.findIndex((l) => stripAnsi(l).includes("untouched file"));
 	assert.ok(onEditIdx >= 0 && offEditIdx >= 0, "both notes rendered");
-	assert.match(stripAnsi(lines[onEditIdx]), /addressed/i, "on-edit note marked addressed");
-	assert.match(stripAnsi(lines[offEditIdx]), /pending/i, "off-edit note marked pending");
+	assert.match(stripAnsi(lines[onEditIdx]), /touched/i, "on-edit note marked touched");
+	assert.match(stripAnsi(lines[offEditIdx]), /open/i, "off-edit note marked open");
 }
 
-console.log("pi-huff units ok");
+// --- J2: a note pinned to a removed line (oldLine) counts as touched -------
+// Regression: the overlap check used to compare oldLine against the edit's
+// new-side span only, so a note on a deleted line always read as "open".
+// touchedLineRanges now spans both sides; oldLine checks the old-side span.
+{
+	const cwd = repoRoot;
+	const store = createRenderRecordStore();
+	store.record("call-1", {
+		tool: "edit",
+		filePath: path.join(cwd, "src", "app.ts"),
+		patch: writePatch("a/src/app.ts", "b/src/app.ts", "a\nb\nc\nd\ne\n", "a\nb\nc\n"),
+		summary: "deleted lines 4-5",
+	});
+	const findRecent = (filePath) => store.findRecent(filePath, cwd);
+	const bridge = createHunkBridge(findRecent);
+
+	const result = {
+		live: true,
+		session: { id: "s" },
+		comments: [
+			{ id: "n1", type: "user", filePath: "src/app.ts", oldLine: 4, summary: "on the removed line" },
+		],
+		message: "",
+	};
+	const lines = bridge.renderReviewLines(result, findRecent, cwd, fakeTheme());
+	const idx = lines.findIndex((l) => stripAnsi(l).includes("on the removed line"));
+	assert.ok(idx >= 0, "removed-line note rendered");
+	assert.match(stripAnsi(lines[idx]), /touched/i, "note on a removed line is touched, not open");
+}
+
+console.log("pi-hunk units ok");
