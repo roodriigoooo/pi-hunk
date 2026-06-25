@@ -116,7 +116,7 @@ function renderTool(tool, toolCallId, result, args, cwd) {
 	return component.render(100).join("\n");
 }
 
-const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-huff-smoke-"));
+const tmp = await mkdtemp(path.join(os.tmpdir(), "pi-hunk-smoke-"));
 try {
 	const fakeHunk = path.join(tmp, "fake-hunk.mjs");
 	await writeFile(
@@ -150,7 +150,7 @@ if (joined.startsWith("session comment list")) {
   assertFlag(valueAfter("--type") === "user", "comment list missing --type user");
   assertFlag(args.includes("--json"), "comment list missing --json");
   console.log(JSON.stringify({ comments: [
-    { id: "c1", type: "user", filePath: "smoke.ts", newLine: 1, summary: "tighten the greeting", rationale: "the reviewed line should mention Huff", author: "human" },
+    { id: "c1", type: "user", filePath: "smoke.ts", newLine: 1, summary: "tighten the greeting", rationale: "the reviewed line should mention Hunk", author: "human" },
     { id: "c2", type: "user", filePath: "smoke.ts", newLine: 1, summary: "keep the file tiny", rationale: "no extra scaffolding", author: "human" }
   ] }));
   process.exit(0);
@@ -162,7 +162,7 @@ process.exit(2);
 	);
 	await chmod(fakeHunk, 0o755);
 	await mkdir(path.join(tmp, ".pi"), { recursive: true });
-	await writeFile(path.join(tmp, ".pi", "huff.json"), JSON.stringify({ hunk: { binary: fakeHunk }, maxRenderedLines: 80 }, null, 2), "utf8");
+	await writeFile(path.join(tmp, ".pi", "hunk.json"), JSON.stringify({ hunk: { binary: fakeHunk }, maxRenderedLines: 80 }, null, 2), "utf8");
 
 	const notifications = [];
 	const statuses = new Map();
@@ -231,12 +231,12 @@ process.exit(2);
 	await extensionFactory(pi);
 	assert.ok(tools.has("write"), "write tool registered");
 	assert.ok(tools.has("edit"), "edit tool registered");
-	assert.ok(tools.has("huff_review_notes"), "read-only review tool registered");
-	assert.ok(commands.has("huff"), "/huff command registered");
+	assert.ok(tools.has("hunk_review_notes"), "read-only review tool registered");
+	assert.ok(commands.has("hunk"), "/hunk command registered");
 
 	const ctx = makeCtx(tmp, ui, true);
 	for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, ctx);
-	assert.equal(statuses.get("huff"), "huff ✦");
+	assert.equal(statuses.get("hunk"), "hunk ✦");
 	await new Promise((resolve) => setTimeout(resolve, 50));
 
 	const writeTool = tools.get("write");
@@ -266,26 +266,26 @@ process.exit(2);
 	assert.equal(await readFile(path.join(tmp, "queued.ts"), "utf8"), "two\n");
 
 	const editTool = tools.get("edit");
-	const editArgs = { path: "smoke.ts", edits: [{ oldText: "hello world\n", newText: "hello huff\n" }] };
+	const editArgs = { path: "smoke.ts", edits: [{ oldText: "hello world\n", newText: "hello hunk\n" }] };
 	const editResult = await editTool.execute("smoke-edit", editArgs, undefined, undefined, ctx);
 	const editView = renderTool(editTool, "smoke-edit", editResult, editArgs, tmp);
 	const editPlain = stripAnsi(editView);
 	assert.match(editPlain, /edited/);
-	assert.match(editPlain, /huff/);
+	assert.match(editPlain, /hunk/);
 	assert.match(editPlain, /@@/);
 
-	const reviewTool = tools.get("huff_review_notes");
+	const reviewTool = tools.get("hunk_review_notes");
 	const reviewResult = await reviewTool.execute("smoke-review", {}, undefined, undefined, ctx);
 	assert.match(reviewResult.content[0].text, /tighten the greeting/);
-	assert.doesNotMatch(reviewResult.content[0].text, /Recent Huff diff:/);
+	assert.doesNotMatch(reviewResult.content[0].text, /Recent Hunk diff:/);
 	const reviewView = renderTool(reviewTool, "smoke-review", reviewResult, {}, tmp);
 	const reviewPlain = stripAnsi(reviewView);
 	assert.match(reviewPlain, /Hunk review notes/);
 	assert.match(reviewPlain, /2 user notes/);
 	assert.match(reviewPlain, /tighten the greeting/);
-	assert.doesNotMatch(reviewPlain, /Recent Huff diff:/);
+	assert.doesNotMatch(reviewPlain, /Recent Hunk diff:/);
 
-	await commands.get("huff").handler("auto on", ctx);
+	await commands.get("hunk").handler("auto on", ctx);
 	const autoResults = [];
 	for (const handler of handlers.get("before_agent_start") ?? []) {
 		const result = await handler({ type: "before_agent_start", prompt: "continue" }, ctx);
@@ -295,38 +295,38 @@ process.exit(2);
 	assert.match(autoResults[0].message.content, /tighten the greeting/);
 	assert.match(autoResults[0].message.content, /keep the file tiny/);
 
-	await commands.get("huff").handler("send", ctx);
+	await commands.get("hunk").handler("send", ctx);
 	assert.equal(sentUserMessages.length, 1);
 	assert.match(sentUserMessages[0].content, /tighten the greeting/);
 	assert.equal(sentUserMessages[0].options.deliverAs, "followUp");
 
-	// /huff review pairs notes with recent edits (read-only, human-facing).
+	// /hunk review pairs notes with recent edits (read-only, human-facing).
 	const reviewBefore = configureSnapshots.length;
-	await commands.get("huff").handler("review", ctx);
+	await commands.get("hunk").handler("review", ctx);
 	const reviewSnap = configureSnapshots.slice(reviewBefore).join("\n");
-	assert.match(reviewSnap, /Hunk review/, "/huff review renders review header");
+	assert.match(reviewSnap, /Hunk review/, "/hunk review renders review header");
 	// both smoke notes are on smoke.ts newLine 1, which the edit above touched
-	assert.match(reviewSnap, /addressed/i, "/huff review marks overlapping notes addressed");
+	assert.match(reviewSnap, /touched/i, "/hunk review marks overlapping notes touched");
 
-	const huffDir = path.join(tmp, ".pi", "huff");
+	const hunkDir = path.join(tmp, ".pi", "hunk");
 	let sidecars = [];
 	try {
-		sidecars = await readdir(huffDir);
+		sidecars = await readdir(hunkDir);
 	} catch {}
 	assert.equal(sidecars.filter((name) => name.endsWith(".agent-context.json") || name.endsWith(".patch")).length, 0, "no patch or agent-context sidecars written");
 
 	const finalFile = await readFile(path.join(tmp, "smoke.ts"), "utf8");
-	assert.equal(finalFile, await readFile(path.join(tmp, "smoke.ts"), "utf8"), "hello huff\n");
+	assert.equal(finalFile, "hello hunk\n");
 
 	const configureStart = configureSnapshots.length;
-	await commands.get("huff").handler("configure", ctx);
+	await commands.get("hunk").handler("configure", ctx);
 	const cfgSnapshots = configureSnapshots.slice(configureStart);
-	assert.ok(cfgSnapshots[0].includes("Huff Configuration"), "configure opens with title");
+	assert.ok(cfgSnapshots[0].includes("Hunk Configuration"), "configure opens with title");
 	assert.ok(cfgSnapshots[0].includes("Side colors & words"), "configure shows group nav");
 	assert.ok(cfgSnapshots.some((s) => s.includes("word emphasis")), "enter descends into a group showing its settings");
 	assert.ok(cfgSnapshots.some((snapshot) => /↑↓ move · Enter select/.test(snapshot)), "second enter opens a picker inside the group");
 
-	console.log("pi-huff smoke ok");
+	console.log("pi-hunk smoke ok");
 } finally {
 	await rm(tmp, { recursive: true, force: true });
 }

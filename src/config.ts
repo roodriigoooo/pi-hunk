@@ -37,7 +37,7 @@ export type SymbolSlots = {
 /** Resolved ANSI foreground strings, ready to emit. */
 export type Palette = { add: string; remove: string; context: string; meta: string; header: string; lineNo: string };
 
-export type HuffConfig = {
+export type HunkConfig = {
 	enabled: boolean;
 	diffTheme: "auto" | "dark" | "light";
 	shikiDarkTheme: string;
@@ -60,6 +60,7 @@ export type HuffConfig = {
 		binary: string;
 		reviewTool: boolean;
 		autoReviewNotes: boolean;
+		/** Legacy count gate retained for config compatibility; pickup now uses any relevant note. */
 		autoReviewNotesMin: number;
 	};
 };
@@ -106,7 +107,7 @@ export const LINE_NUMBERS_VALUES: string[] = ["true", "false", "changed"];
 export const COLOR_VALUES: string[] = ["auto", "green", "red", "gray", "dim", "muted", "accent", "title", "warning", "error"];
 export const BOOL_VALUES: string[] = ["true", "false"];
 
-export const DEFAULT_CONFIG: HuffConfig = {
+export const DEFAULT_CONFIG: HunkConfig = {
 	enabled: true,
 	diffTheme: "auto",
 	shikiDarkTheme: "github-dark",
@@ -126,7 +127,7 @@ export const DEFAULT_CONFIG: HuffConfig = {
 		binary: "hunk",
 		reviewTool: true,
 		autoReviewNotes: false,
-		autoReviewNotesMin: 2,
+		autoReviewNotesMin: 1,
 	},
 };
 
@@ -166,7 +167,7 @@ function legacyWordHighlight(emphStyle: EmphStyle | undefined, wordHighlights: b
 	return undefined;
 }
 
-export function normalizeConfig(config: HuffConfig): HuffConfig {
+export function normalizeConfig(config: HunkConfig): HunkConfig {
 	const legacy = legacyWordHighlight(config.emphStyle, config.wordHighlights);
 	if (legacy && (!config.wordHighlight || config.wordHighlight === "bold") && config.emphStyle !== undefined) {
 		config.wordHighlight = legacy;
@@ -177,9 +178,9 @@ export function normalizeConfig(config: HuffConfig): HuffConfig {
 	return config;
 }
 
-export function mergeConfig(base: HuffConfig, next?: Partial<HuffConfig>): HuffConfig {
+export function mergeConfig(base: HunkConfig, next?: Partial<HunkConfig>): HunkConfig {
 	if (!next) return base;
-	const merged: HuffConfig = {
+	const merged: HunkConfig = {
 		...base,
 		...next,
 		colors: { ...base.colors, ...(next.colors ?? {}) },
@@ -189,22 +190,36 @@ export function mergeConfig(base: HuffConfig, next?: Partial<HuffConfig>): HuffC
 	return normalizeConfig(merged);
 }
 
-async function loadJsonFile(filePath: string): Promise<Partial<HuffConfig> | undefined> {
+async function loadJsonFile(filePath: string): Promise<Partial<HunkConfig> | undefined> {
 	try {
 		if (!existsSync(filePath)) return undefined;
-		return JSON.parse(await fs.readFile(filePath, "utf8")) as Partial<HuffConfig>;
+		return JSON.parse(await fs.readFile(filePath, "utf8")) as Partial<HunkConfig>;
 	} catch {
 		return undefined;
 	}
 }
 
-export async function loadConfig(cwd: string): Promise<HuffConfig> {
-	const globalConfig = await loadJsonFile(path.join(os.homedir(), ".pi", "agent", "huff.json"));
-	const projectConfig = await loadJsonFile(path.join(cwd, ".pi", "huff.json"));
+async function loadFirstJsonFile(filePaths: string[]): Promise<Partial<HunkConfig> | undefined> {
+	for (const filePath of filePaths) {
+		const config = await loadJsonFile(filePath);
+		if (config) return config;
+	}
+	return undefined;
+}
+
+export async function loadConfig(cwd: string): Promise<HunkConfig> {
+	const globalConfig = await loadFirstJsonFile([
+		path.join(os.homedir(), ".pi", "agent", "hunk.json"),
+		path.join(os.homedir(), ".pi", "agent", "huff.json"),
+	]);
+	const projectConfig = await loadFirstJsonFile([
+		path.join(cwd, ".pi", "hunk.json"),
+		path.join(cwd, ".pi", "huff.json"),
+	]);
 	return mergeConfig(mergeConfig(DEFAULT_CONFIG, globalConfig), projectConfig);
 }
 
-export async function readJsonFile(filePath: string): Promise<Partial<HuffConfig> | undefined> {
+export async function readJsonFile(filePath: string): Promise<Partial<HunkConfig> | undefined> {
 	return loadJsonFile(filePath);
 }
 
@@ -233,7 +248,7 @@ export function resolveColorAnsi(ref: ColorRef, fallbackSlot: string, theme: The
 	return theme.getFgAnsi(ref) || theme.getFgAnsi(fallbackSlot) || "";
 }
 
-export function resolvePalette(config: HuffConfig, theme: Theme): Palette {
+export function resolvePalette(config: HunkConfig, theme: Theme): Palette {
 	return {
 		add: resolveColorAnsi(config.colors.add, "toolDiffAdded", theme),
 		remove: resolveColorAnsi(config.colors.remove, "toolDiffRemoved", theme),
@@ -247,7 +262,7 @@ export function resolvePalette(config: HuffConfig, theme: Theme): Palette {
 export type DiffSide = "add" | "remove" | "context";
 
 /** Gutter follows the side color when `auto`, else the configured ref. */
-export function gutterColor(config: HuffConfig, side: DiffSide, theme: Theme): string {
+export function gutterColor(config: HunkConfig, side: DiffSide, theme: Theme): string {
 	const ref = config.colors.gutter;
 	if (!ref || ref === "auto") {
 		const palette = resolvePalette(config, theme);
@@ -264,13 +279,13 @@ export function tintBgAnsi(side: DiffSide): string {
 // Shiki theme selection
 // ============================================================================
 
-export function displayTheme(config: HuffConfig, theme: Theme): string {
+export function displayTheme(config: HunkConfig, theme: Theme): string {
 	if (config.diffTheme === "light") return config.shikiLightTheme;
 	if (config.diffTheme === "dark") return config.shikiDarkTheme;
 	const name = (theme.name ?? "").toLowerCase();
 	return name.includes("light") ? config.shikiLightTheme : config.shikiDarkTheme;
 }
 
-export function highlighterKey(config: HuffConfig): string {
+export function highlighterKey(config: HunkConfig): string {
 	return JSON.stringify([config.shikiDarkTheme, config.shikiLightTheme]);
 }

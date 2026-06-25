@@ -1,5 +1,7 @@
 node_modules/
 .DS_Store
+.pi/hunk.json
+.pi/hunk/
 .pi/huff.json
 .pi/huff/
 PLAN.md

@@ -98,10 +98,10 @@ jobs:
           if [ -f "$NOTES_FILE" ]; then
             NOTES_ARGS=(--notes-file "$NOTES_FILE")
           else
-            NOTES_ARGS=(--notes "pi-huff $TAG")
+            NOTES_ARGS=(--notes "pi-hunk $TAG")
           fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            gh release create "$TAG" ./*.tgz --target "$GITHUB_SHA" --title "pi-huff $TAG" "${NOTES_ARGS[@]}"
+            gh release create "$TAG" ./*.tgz --target "$GITHUB_SHA" --title "pi-hunk $TAG" "${NOTES_ARGS[@]}"
           else
-            gh release create "$TAG" ./*.tgz --title "pi-huff $TAG" "${NOTES_ARGS[@]}"
+            gh release create "$TAG" ./*.tgz --title "pi-hunk $TAG" "${NOTES_ARGS[@]}"
           fi

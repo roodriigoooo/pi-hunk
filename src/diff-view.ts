@@ -6,7 +6,7 @@ import {
 	ansiFg,
 	type DiffSide,
 	displayTheme,
-	type HuffConfig,
+	type HunkConfig,
 	gutterColor,
 	resolvePalette,
 	tintBgAnsi,
@@ -156,7 +156,7 @@ function countStats(parsed: ParsedPatch): { added: number; removed: number; file
 	return { added, removed, files: 1, hunks: parsed.hunks.length };
 }
 
-function filteredHunkLines(hunk: ParsedHunk, config: HuffConfig): Array<DiffLine | { kind: "skip"; count: number }> {
+function filteredHunkLines(hunk: ParsedHunk, config: HunkConfig): Array<DiffLine | { kind: "skip"; count: number }> {
 	if (!config.compactUnchanged) return hunk.lines;
 	const changed = new Set<number>();
 	for (let i = 0; i < hunk.lines.length; i++) {
@@ -259,7 +259,7 @@ function inRanges(index: number, ranges: Range[]): boolean {
 	return ranges.some((r) => index >= r.start && index < r.end);
 }
 
-function styleToken(text: string, color: string | undefined, emph: boolean, side: DiffSide, config: HuffConfig, theme: Theme, sideAnsi: string): string {
+function styleToken(text: string, color: string | undefined, emph: boolean, side: DiffSide, config: HunkConfig, theme: Theme, sideAnsi: string): string {
 	let start = ansiFg(color);
 	if (emph) start += wordHighlightAnsi(config.wordHighlight, side, theme);
 	if (!start) return text;
@@ -270,7 +270,7 @@ function renderCodeLine(
 	line: string,
 	tokens: ShikiTokenLine | undefined,
 	theme: Theme,
-	config: HuffConfig,
+	config: HunkConfig,
 	side: DiffSide,
 	ranges: Range[],
 	sideAnsi: string,
@@ -297,7 +297,7 @@ function renderCodeLine(
 // Line furniture
 // ============================================================================
 
-function lineNoText(line: DiffLine, palette: { lineNo: string }, mode: HuffConfig["lineNumbers"]): string {
+function lineNoText(line: DiffLine, palette: { lineNo: string }, mode: HunkConfig["lineNumbers"]): string {
 	const isChanged = line.kind === "add" || line.kind === "remove";
 	if (mode === "changed" && !isChanged) return "     ";
 	const old = line.oldLine === undefined ? "    " : String(line.oldLine).padStart(4, " ");
@@ -310,10 +310,10 @@ function hunkCaption(hunk: ParsedHunk, filePath: string, cwd: string, theme: The
 	return `${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "hunk")} ${theme.fg("dim", "·")} ${theme.fg("muted", loc)}`;
 }
 
-function hunkFooter(config: HuffConfig, theme: Theme, hasLiveSession: boolean): string[] {
+function hunkFooter(config: HunkConfig, theme: Theme, hasLiveSession: boolean): string[] {
 	if (!config.showHunkHint || !config.hunk.enabled || !hasLiveSession) return [];
-	const toolHint = config.hunk.reviewTool ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", "huff_review_notes")}` : "";
-	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/huff send")} sends human review notes${toolHint}`];
+	const toolHint = config.hunk.reviewTool ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", "hunk_review_notes")}` : "";
+	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/hunk review")} opens review state ${theme.fg("dim", "·")} ${theme.fg("muted", "/hunk send")} attaches it${toolHint}`];
 }
 
 // ============================================================================
@@ -325,7 +325,7 @@ export type DiffViewInput = {
 	filePath: string;
 	cwd: string;
 	title: string;
-	config: HuffConfig;
+	config: HunkConfig;
 	highlighter: Highlighter | undefined;
 	theme: Theme;
 	liveSession?: boolean;

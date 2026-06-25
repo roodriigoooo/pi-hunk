@@ -1,15 +1,15 @@
 {
-  "name": "@roodriigoooo/pi-huff",
+  "name": "@roodriigoooo/pi-hunk",
   "version": "0.3.0",
-  "description": "Configurable Shiki terminal diffs and read-only Hunk review notes for pi.",
+  "description": "Review-first Shiki terminal diffs and spatial Hunk review notes for pi.",
   "type": "module",
   "license": "MIT",
   "author": "rosastre",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/roodriigoooo/pi-huff.git"
+    "url": "git+https://github.com/roodriigoooo/pi-hunk.git"
   },
-  "homepage": "https://github.com/roodriigoooo/pi-huff",
+  "homepage": "https://github.com/roodriigoooo/pi-hunk",
   "files": [
     "src",
     "README.md",

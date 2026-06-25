@@ -17,7 +17,7 @@ import { bundledThemesInfo } from "shiki";
 import {
 	BOOL_VALUES,
 	HEADER_VALUES,
-	type HuffConfig,
+	type HunkConfig,
 	LINE_HIGHLIGHT_VALUES,
 	LINE_NUMBERS_VALUES,
 	resolveColorAnsi,
@@ -27,7 +27,7 @@ import {
 } from "./config";
 import { type Highlighter, createDiffView } from "./diff-view";
 
-const HUFF_CONFIG_SAMPLE_PATCH = [
+const HUNK_CONFIG_SAMPLE_PATCH = [
 	"--- a/preview.ts",
 	"+++ b/preview.ts",
 	"@@ -1,22 +1,23 @@",
@@ -51,7 +51,7 @@ const HUFF_CONFIG_SAMPLE_PATCH = [
 	" }",
 	" ",
 	" export const FLAGS = { compact: true, preview: true };",
-	" export const OWNER = \"huff\";",
+	" export const OWNER = \"hunk\";",
 	" export const STATUS = \"draft\";",
 	" ",
 	"-export const VERSION = \"0.1.0\";",
@@ -81,15 +81,15 @@ const COLOR_FALLBACKS: Record<keyof ColorSlots, string> = {
 };
 
 type Choice = { value: string; label?: string; description?: string };
-type ChoiceFactory = (config: HuffConfig, theme: Theme) => Choice[];
+type ChoiceFactory = (config: HunkConfig, theme: Theme) => Choice[];
 type ConfigSpec = {
 	id: string;
 	label: string;
 	values?: string[];
 	choices?: Choice[] | ChoiceFactory;
-	get: (c: HuffConfig) => string;
-	set: (c: HuffConfig, v: string) => void;
-	describe?: (value: string, config: HuffConfig, theme: Theme) => string;
+	get: (c: HunkConfig) => string;
+	set: (c: HunkConfig, v: string) => void;
+	describe?: (value: string, config: HunkConfig, theme: Theme) => string;
 };
 
 type ConfigGroup = {
@@ -104,7 +104,7 @@ function normalizeHex(value: string): string {
 	return hex.toLowerCase();
 }
 
-function boolSpec(id: string, label: string, get: (c: HuffConfig) => boolean, set: (c: HuffConfig, v: boolean) => void, detail?: string): ConfigSpec {
+function boolSpec(id: string, label: string, get: (c: HunkConfig) => boolean, set: (c: HunkConfig, v: boolean) => void, detail?: string): ConfigSpec {
 	return {
 		id,
 		label,
@@ -115,11 +115,11 @@ function boolSpec(id: string, label: string, get: (c: HuffConfig) => boolean, se
 	};
 }
 
-function numSpec(id: string, label: string, values: string[], get: (c: HuffConfig) => number, set: (c: HuffConfig, v: number) => void, detail: string): ConfigSpec {
+function numSpec(id: string, label: string, values: string[], get: (c: HunkConfig) => number, set: (c: HunkConfig, v: number) => void, detail: string): ConfigSpec {
 	return { id, label, values, get: (c) => String(get(c)), set: (c, v) => set(c, Number(v)), describe: () => detail };
 }
 
-function choiceSpec(id: string, label: string, choices: Choice[] | ChoiceFactory, get: (c: HuffConfig) => string, set: (c: HuffConfig, v: string) => void, detail?: string): ConfigSpec {
+function choiceSpec(id: string, label: string, choices: Choice[] | ChoiceFactory, get: (c: HunkConfig) => string, set: (c: HunkConfig, v: string) => void, detail?: string): ConfigSpec {
 	return {
 		id,
 		label,
@@ -230,7 +230,7 @@ function colorDescription(slot: keyof ColorSlots, value: string, theme: Theme): 
 	return choiceDescription(colorChoices(slot, theme), value) ?? "Resolved as a pi theme color name if present.";
 }
 
-function choicesForSpec(spec: Pick<ConfigSpec, "choices" | "values" | "get" | "describe">, config: HuffConfig, theme: Theme): Choice[] {
+function choicesForSpec(spec: Pick<ConfigSpec, "choices" | "values" | "get" | "describe">, config: HunkConfig, theme: Theme): Choice[] {
 	const choices = spec.choices
 		? typeof spec.choices === "function"
 			? spec.choices(config, theme)
@@ -241,7 +241,7 @@ function choicesForSpec(spec: Pick<ConfigSpec, "choices" | "values" | "get" | "d
 	return [{ value: current, label: `${current} · current custom value`, description: "Current value from config; not in the built-in picker list." }, ...choices];
 }
 
-function descriptionForSpec(spec: ConfigSpec, config: HuffConfig, theme: Theme): string {
+function descriptionForSpec(spec: ConfigSpec, config: HunkConfig, theme: Theme): string {
 	const value = spec.get(config);
 	const detail = spec.describe?.(value, config, theme) ?? choiceDescription(choicesForSpec(spec, config, theme), value);
 	return detail ? `Current: ${value} — ${detail}` : `Current: ${value}`;
@@ -364,7 +364,7 @@ class ChoicePicker implements Component {
 }
 
 /** All config specs grouped by what the user sees, not by config key. */
-function huffConfigGroups(): ConfigGroup[] {
+function hunkConfigGroups(): ConfigGroup[] {
 	return [
 		{
 			id: "words",
@@ -435,29 +435,28 @@ function huffConfigGroups(): ConfigGroup[] {
 			label: "Renderer & Hunk bridge",
 			description: "Master toggle, hunk hint, and read-only Hunk integration.",
 			specs: [
-				boolSpec("enabled", "renderer", (c) => c.enabled, (c, v) => (c.enabled = v), "Turn Huff diff rendering on/off."),
-				boolSpec("showHunkHint", "hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /huff send hint when a live Hunk session exists."),
+				boolSpec("enabled", "renderer", (c) => c.enabled, (c, v) => (c.enabled = v), "Turn pi-hunk diff rendering on/off."),
+				boolSpec("showHunkHint", "hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /hunk review hint when a live Hunk session exists."),
 				boolSpec("hunk.enabled", "hunk bridge", (c) => c.hunk.enabled, (c, v) => (c.hunk.enabled = v), "Enable read-only Hunk session integration."),
-				boolSpec("hunk.reviewTool", "review tool", (c) => c.hunk.reviewTool, (c, v) => (c.hunk.reviewTool = v), "Expose huff_review_notes to the model."),
-				boolSpec("hunk.autoReviewNotes", "auto pickup", (c) => c.hunk.autoReviewNotes, (c, v) => (c.hunk.autoReviewNotes = v), "Inject new human notes before agent turns."),
-				numSpec("hunk.autoReviewNotesMin", "auto min notes", ["1", "2", "3", "5"], (c) => c.hunk.autoReviewNotesMin, (c, v) => (c.hunk.autoReviewNotesMin = v), "Minimum user notes required for automatic pickup."),
+				boolSpec("hunk.reviewTool", "review tool", (c) => c.hunk.reviewTool, (c, v) => (c.hunk.reviewTool = v), "Expose hunk_review_notes to the model."),
+				boolSpec("hunk.autoReviewNotes", "auto pickup", (c) => c.hunk.autoReviewNotes, (c, v) => (c.hunk.autoReviewNotes = v), "Attach new relevant human notes before agent turns."),
 			],
 		},
 	];
 }
 
-function cloneConfig(config: HuffConfig): HuffConfig {
+function cloneConfig(config: HunkConfig): HunkConfig {
 	return { ...config, colors: { ...config.colors }, symbols: { ...config.symbols }, hunk: { ...config.hunk } };
 }
 
-async function saveProjectHuffConfig(cwd: string, config: HuffConfig): Promise<void> {
+async function saveProjectHunkConfig(cwd: string, config: HunkConfig): Promise<void> {
 	const dir = path.join(cwd, ".pi");
 	await fs.mkdir(dir, { recursive: true });
-	const filePath = path.join(dir, "huff.json");
+	const filePath = path.join(dir, "hunk.json");
 	await fs.writeFile(filePath, JSON.stringify(config, null, 2) + "\n", "utf8");
 }
 
-function huffSettingsHint(text: string): string {
+function hunkSettingsHint(text: string): string {
 	return text.replace("Enter/Space to change", "Enter/Space open picker").replace("Esc to cancel", "Esc to save");
 }
 
@@ -467,34 +466,34 @@ function settingsListThemeFromUi(theme: Theme): SettingsListTheme {
 		value: (text, selected) => (selected ? theme.fg("toolTitle", theme.bold(text)) : theme.fg("dim", text)),
 		description: (text) => theme.fg("dim", text),
 		cursor: theme.fg("accent", "› "),
-		hint: (text) => theme.fg("dim", huffSettingsHint(text)),
+		hint: (text) => theme.fg("dim", hunkSettingsHint(text)),
 	};
 }
 
 function resolveSettingsListTheme(theme: Theme): SettingsListTheme {
 	try {
 		const base = getSettingsListTheme();
-		return { ...base, hint: (text) => base.hint(huffSettingsHint(text)) };
+		return { ...base, hint: (text) => base.hint(hunkSettingsHint(text)) };
 	} catch {
 		return settingsListThemeFromUi(theme);
 	}
 }
 
-/** Open the `/huff configure` live-preview TUI. Two-level nav: group list →
+/** Open the `/hunk configure` live-preview TUI. Two-level nav: group list →
  *  per-group settings. Esc inside a group returns to the group list; Esc on the
- *  group list saves to `.pi/huff.json` and closes. */
-export async function openHuffConfig(
+ *  group list saves to `.pi/hunk.json` and closes. */
+export async function openHunkConfig(
 	ctx: ExtensionCommandContext,
-	getConfig: () => HuffConfig,
-	applyConfig: (next: HuffConfig) => Promise<void>,
-	getHighlighter: (config: HuffConfig, invalidate?: () => void) => Highlighter | undefined,
+	getConfig: () => HunkConfig,
+	applyConfig: (next: HunkConfig) => Promise<void>,
+	getHighlighter: (config: HunkConfig, invalidate?: () => void) => Highlighter | undefined,
 ) {
 	if (ctx.mode !== "tui") {
-		ctx.ui.notify("/huff configure requires TUI mode.", "error");
+		ctx.ui.notify("/hunk configure requires TUI mode.", "error");
 		return;
 	}
 	const draft = cloneConfig(getConfig());
-	const groups = huffConfigGroups();
+	const groups = hunkConfigGroups();
 	let theme = ctx.ui.theme;
 	let requestPreviewRender: (() => void) | undefined;
 	let closeDone: ((value?: void) => void) | undefined;
@@ -502,12 +501,12 @@ export async function openHuffConfig(
 	function buildPreview(): Component {
 		if (!draft.enabled) {
 			return new StaticLines(() => [
-				theme.fg("muted", "Huff renderer disabled."),
+				theme.fg("muted", "pi-hunk renderer disabled."),
 				theme.fg("dim", "Pi will use default tool rendering until enabled again."),
 			]);
 		}
 		return createDiffView({
-			patch: HUFF_CONFIG_SAMPLE_PATCH,
+			patch: HUNK_CONFIG_SAMPLE_PATCH,
 			filePath: "preview.ts",
 			cwd: ctx.cwd,
 			title: "preview",
@@ -536,10 +535,10 @@ export async function openHuffConfig(
 		currentGroup = Number(item.value);
 	};
 	groupNav.onCancel = () => {
-		saveProjectHuffConfig(ctx.cwd, draft)
+		saveProjectHunkConfig(ctx.cwd, draft)
 			.then(() => applyConfig(draft))
-			.then(() => ctx.ui.notify("Saved Huff config to .pi/huff.json.", "info"))
-			.catch((error) => ctx.ui.notify(`Failed to save Huff config: ${String(error)}`, "error"))
+			.then(() => ctx.ui.notify("Saved Hunk config to .pi/hunk.json.", "info"))
+			.catch((error) => ctx.ui.notify(`Failed to save Hunk config: ${String(error)}`, "error"))
 			.finally(() => closeDone?.());
 	};
 
@@ -593,7 +592,7 @@ export async function openHuffConfig(
 		return {
 			render(width: number): string[] {
 				const out: string[] = [];
-				out.push(`${theme.fg("accent", theme.bold("Huff Configuration"))} ${theme.fg("dim", "· live Shiki preview")}`);
+				out.push(`${theme.fg("accent", theme.bold("Hunk Configuration"))} ${theme.fg("dim", "· live Shiki preview")}`);
 				if (currentGroup === -1) {
 					out.push(theme.fg("dim", "Enter opens group · Esc saves & closes"));
 				} else {
