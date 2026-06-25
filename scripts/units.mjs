@@ -39,9 +39,11 @@ const jiti = createJiti(import.meta.url, {
 	},
 });
 
-const { parseUnifiedPatch, renderDiffLines } = await jiti.import(path.join(repoRoot, "src", "diff-view.ts"), { default: false });
+const { parseUnifiedPatch, renderDiffLines, findPatchLineAddress, patchLineAddressKey } = await jiti.import(path.join(repoRoot, "src", "diff-view.ts"), { default: false });
 const { DEFAULT_CONFIG, ansiFg } = await jiti.import(path.join(repoRoot, "src", "config.ts"), { default: false });
-const { normalizeHunkComments, createHunkBridge } = await jiti.import(path.join(repoRoot, "src", "hunk-bridge.ts"), { default: false });
+const { choicesForSpec, descriptionForSpec, hunkConfigGroups } = await jiti.import(path.join(repoRoot, "src", "config-spec.ts"), { default: false });
+const { createHighlighterCache } = await jiti.import(path.join(repoRoot, "src", "highlighter-cache.ts"), { default: false });
+const { normalizeHunkComments, createHunkBridge, buildReviewNoteShape, reviewAnnotationsForRecord } = await jiti.import(path.join(repoRoot, "src", "hunk-bridge.ts"), { default: false });
 const { createRenderRecordStore } = await jiti.import(path.join(repoRoot, "src", "render-records.ts"), { default: false });
 const { writePatch } = await jiti.import(path.join(repoRoot, "src", "diff-view.ts"), { default: false });
 
@@ -115,6 +117,26 @@ assert.ok(removeEmph, "emphasized range starts past the shared prefix");
 // trailing blank split row must not become a phantom context line
 const trailingBlank = parseUnifiedPatch(patch + "\n");
 assert.equal(trailingBlank.hunks[0].lines.length, hunk.lines.length, "no phantom trailing line");
+
+// patch address query: a review note lands on the rendered row it names
+const noteAddress = findPatchLineAddress(parsed, { filePath: "a.ts", newLine: 2 }, repoRoot);
+assert.ok(noteAddress, "new-side address found");
+assert.equal(noteAddress.kind, "add");
+assert.equal(noteAddress.lineIndex, 2);
+const annotatedRender = renderDiffLines({
+	patch,
+	filePath: "a.ts",
+	cwd: repoRoot,
+	title: "unit",
+	config: { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false },
+	highlighter: fakeHighlighter,
+	theme: fakeTheme(),
+	liveSession: false,
+	annotations: new Map([[patchLineAddressKey(noteAddress), [{ text: "tighten greeting", detail: "human rationale", author: "human" }]]]),
+});
+const annotatedLine = annotatedRender.find((line) => stripAnsi(line).includes("tighten greeting"));
+assert.ok(annotatedLine, "annotation rendered inline beside addressed row");
+assert.match(stripAnsi(annotatedLine), /hi.*note human: tighten greeting \(human rationale\)/);
 
 // strike word highlighting is side-aware: deletions strike, additions underline
 const strikeRender = renderDiffLines({
@@ -305,6 +327,42 @@ assert.equal(altFields[0].author, "human");
 	assert.equal(inj2, false, "unchanged review state is deduped");
 }
 
+// --- I2: shared patch model shapes review notes by rendered hunk row --------
+{
+	const cwd = repoRoot;
+	const store = createRenderRecordStore();
+	const record = {
+		tool: "edit",
+		filePath: path.join(cwd, "src", "app.ts"),
+		patch: writePatch("a/src/app.ts", "b/src/app.ts", "line1\nline2\nold\nold\nline5\n", "line1\nline2\nnewA\nnewB\nline5\n"),
+		summary: "edited app.ts",
+	};
+	store.record("call-1", record);
+	const findRecent = (filePath) => store.findRecent(filePath, cwd);
+	const comments = [
+		{ id: "n1", type: "user", filePath: "src/app.ts", newLine: 4, summary: "pin on new row", rationale: "spatial" },
+		{ id: "n2", type: "user", filePath: "src/missing.ts", newLine: 1, summary: "no patch" },
+	];
+	const shape = buildReviewNoteShape(comments, findRecent, cwd);
+	assert.equal(shape.hunks.length, 1, "one rendered hunk owns matching note");
+	assert.equal(shape.hunks[0].lines.length, 1, "one addressed row in hunk");
+	assert.equal(shape.hunks[0].lines[0].comments[0].summary, "pin on new row");
+	assert.equal(shape.openComments.length, 1, "unmatched note remains open");
+	const annotations = reviewAnnotationsForRecord(comments, record, cwd);
+	const rendered = renderDiffLines({
+		patch: record.patch,
+		filePath: record.filePath,
+		cwd,
+		title: "review notes",
+		config: { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false },
+		highlighter: fakeHighlighter,
+		theme: fakeTheme(),
+		liveSession: false,
+		annotations,
+	});
+	assert.ok(rendered.some((line) => /newB.*note pin on new row/.test(stripAnsi(line))), "review annotation shares diff renderer row");
+}
+
 // --- J: /hunk review pairs notes with recent edits (read-only) -------------
 
 // renderReviewLines lists each human note with whether a recent edit touched
@@ -346,7 +404,7 @@ assert.equal(altFields[0].author, "human");
 // --- J2: a note pinned to a removed line (oldLine) counts as touched -------
 // Regression: the overlap check used to compare oldLine against the edit's
 // new-side span only, so a note on a deleted line always read as "open".
-// touchedLineRanges now spans both sides; oldLine checks the old-side span.
+// The shared patch address query now checks oldLine against rendered remove rows.
 {
 	const cwd = repoRoot;
 	const store = createRenderRecordStore();
@@ -371,6 +429,77 @@ assert.equal(altFields[0].author, "human");
 	const idx = lines.findIndex((l) => stripAnsi(l).includes("on the removed line"));
 	assert.ok(idx >= 0, "removed-line note rendered");
 	assert.match(stripAnsi(lines[idx]), /touched/i, "note on a removed line is touched, not open");
+}
+
+// --- K: highlighter cache coalesces refreshes and serves stale while loading -
+{
+	const configA = { ...DEFAULT_CONFIG, shikiDarkTheme: "theme-a", shikiLightTheme: "theme-a-light" };
+	const configB = { ...DEFAULT_CONFIG, shikiDarkTheme: "theme-b", shikiLightTheme: "theme-b-light" };
+	let releaseB;
+	const gateB = new Promise((resolve) => (releaseB = resolve));
+	const calls = [];
+	const cache = createHighlighterCache(async (config) => {
+		calls.push(config.shikiDarkTheme);
+		if (config.shikiDarkTheme === "theme-b") await gateB;
+		return { id: config.shikiDarkTheme };
+	});
+	await cache.refresh(configA);
+	assert.equal(cache.get(configA).id, "theme-a", "initial highlighter loaded");
+	const refreshB = cache.refresh(configB);
+	assert.equal(cache.get(configB).id, "theme-a", "stale highlighter served while new key loads");
+	const refreshB2 = cache.refresh(configB);
+	assert.equal(refreshB2, refreshB, "same-key refresh coalesces to one promise");
+	assert.deepEqual(calls, ["theme-a", "theme-b"], "only one rebuild starts for concurrent same-key refreshes");
+	releaseB();
+	await refreshB;
+	assert.equal(cache.get(configB).id, "theme-b", "new highlighter served after refresh completes");
+}
+
+// --- L: config spec model is pure and round-trips without TUI --------------
+{
+	const groups = hunkConfigGroups();
+	const specs = groups.flatMap((group) => group.specs);
+	const ids = specs.map((spec) => spec.id);
+	assert.equal(new Set(ids).size, ids.length, "config spec ids are unique");
+	assert.deepEqual(ids, [
+		"wordHighlight",
+		"colors.add",
+		"colors.remove",
+		"colors.context",
+		"lineHighlight",
+		"colors.gutter",
+		"symbols.gutter",
+		"symbols.add",
+		"symbols.remove",
+		"header",
+		"lineNumbers",
+		"colors.header",
+		"colors.lineNo",
+		"colors.meta",
+		"symbols.context",
+		"symbols.fold",
+		"compactUnchanged",
+		"contextRadius",
+		"maxRenderedLines",
+		"diffTheme",
+		"shikiDarkTheme",
+		"shikiLightTheme",
+		"enabled",
+		"showHunkHint",
+		"hunk.enabled",
+		"hunk.reviewTool",
+		"hunk.autoReviewNotes",
+	], "spec model covers current TUI configuration surface");
+	for (const spec of specs) {
+		const draft = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+		const current = spec.get(draft);
+		const choices = choicesForSpec(spec, draft, fakeTheme());
+		assert.ok(choices.some((choice) => choice.value === current), `${spec.id} choices include current value`);
+		const next = choices.find((choice) => choice.value !== current)?.value ?? current;
+		spec.set(draft, next);
+		assert.equal(spec.get(draft), next, `${spec.id} set/get round-trips`);
+		assert.match(descriptionForSpec(spec, draft, fakeTheme()), /^Current:/, `${spec.id} has description`);
+	}
 }
 
 console.log("pi-hunk units ok");

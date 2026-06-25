@@ -11,12 +11,12 @@ import {
 	type WriteToolInput,
 } from "@earendil-works/pi-coding-agent";
 import { Text, truncateToWidth, wrapTextWithAnsi, type AutocompleteItem } from "@earendil-works/pi-tui";
-import { createHighlighter } from "shiki";
 import fs from "node:fs/promises";
 import { Type } from "typebox";
-import { COMMON_LANGS, type HunkConfig, highlighterKey, loadConfig, mergeConfig } from "./config";
+import { type HunkConfig, loadConfig, mergeConfig } from "./config";
 import { openHunkConfig } from "./configure";
-import { createDiffView, DiffComponent, type Highlighter, writePatch } from "./diff-view";
+import { createDiffView, DiffComponent, writePatch } from "./diff-view";
+import { createHighlighterCache } from "./highlighter-cache";
 import { createHunkBridge, type ReviewNotesResult, stringOr } from "./hunk-bridge";
 import { displayPath, resolveUserPath } from "./paths";
 import { createRenderRecordStore, type RenderRecord } from "./render-records";
@@ -161,47 +161,20 @@ async function handleHunkCommand(
 
 export default async function (pi: ExtensionAPI) {
 	let config = await loadConfig(process.cwd());
-	let highlighter: Highlighter | undefined;
-	let highlighterLoadedKey = "";
-	let highlighterRefresh: Promise<void> | undefined;
 	let liveHunkSession = false;
 
+	const highlighters = createHighlighterCache();
 	const records = createRenderRecordStore();
 	const bridge = createHunkBridge((filePath, cwd) => records.findRecent(filePath, cwd));
 
-	async function rebuildHighlighter(nextConfig: HunkConfig): Promise<void> {
-		const key = highlighterKey(nextConfig);
-		try {
-			highlighter = (await createHighlighter({
-				themes: Array.from(new Set([nextConfig.shikiDarkTheme, nextConfig.shikiLightTheme])),
-				langs: [...COMMON_LANGS],
-			})) as Highlighter;
-			highlighterLoadedKey = key;
-		} catch {
-			highlighter = undefined;
-			highlighterLoadedKey = key;
-		}
-	}
-
-	function kickHighlighter(nextConfig: HunkConfig, invalidate?: () => void): Highlighter | undefined {
-		if (highlighterLoadedKey === highlighterKey(nextConfig)) return highlighter;
-		if (!highlighterRefresh) {
-			highlighterRefresh = rebuildHighlighter(nextConfig).finally(() => {
-				highlighterRefresh = undefined;
-				invalidate?.();
-			});
-		}
-		return highlighter;
-	}
-
-	await rebuildHighlighter(config);
+	await highlighters.refresh(config);
 
 	const editBase = createEditToolDefinition(process.cwd());
 	const writeBase = createWriteToolDefinition(process.cwd());
 
 	pi.on("session_start", async (_event, ctx) => {
 		config = await loadConfig(ctx.cwd);
-		await rebuildHighlighter(config);
+		await highlighters.refresh(config);
 		ctx.ui.setStatus("hunk", config.enabled ? "hunk ✦" : undefined);
 		bridge
 			.probeSession(ctx.cwd, config, ctx.signal)
@@ -240,9 +213,9 @@ export default async function (pi: ExtensionAPI) {
 					() => config,
 					async (nextConfig) => {
 						config = nextConfig;
-						await rebuildHighlighter(nextConfig);
+						await highlighters.refresh(nextConfig);
 					},
-					(nextConfig, invalidate) => kickHighlighter(nextConfig, invalidate),
+					(nextConfig, invalidate) => highlighters.get(nextConfig, invalidate),
 				);
 				return;
 			}
@@ -284,7 +257,7 @@ export default async function (pi: ExtensionAPI) {
 			return new Text(`${theme.fg("accent", "✦")} ${theme.fg("toolTitle", theme.bold("hunk_review_notes"))} ${theme.fg("dim", "· read-only")}`, 0, 0);
 		},
 		renderResult(result, _options, theme: Theme, context: ToolRenderContext<any, Record<string, never>>) {
-			return new DiffComponent(() => bridge.renderNotesLines(result.details as ReviewNotesResult | undefined, context.cwd, theme));
+			return new DiffComponent(() => bridge.renderNotesLines(result.details as ReviewNotesResult | undefined, (filePath, cwd) => records.findRecent(filePath, cwd), context.cwd, theme, config, highlighters.get(config, context.invalidate)));
 		},
 	});
 
@@ -317,7 +290,7 @@ export default async function (pi: ExtensionAPI) {
 			const patch = record?.patch ?? details?.patch;
 			const filePath = record?.filePath ?? resolveUserPath(context.args.path, context.cwd);
 			if (!config.enabled || !patch) return new Text(details?.diff ?? "Edited file", 0, 0);
-			const activeHighlighter = kickHighlighter(config, context.invalidate);
+			const activeHighlighter = highlighters.get(config, context.invalidate);
 			return createDiffView({ patch, filePath, cwd: context.cwd, title: "edited", config, highlighter: activeHighlighter, theme, liveSession: liveHunkSession });
 		},
 	});
@@ -367,7 +340,7 @@ export default async function (pi: ExtensionAPI) {
 		renderResult(_result, _options, theme: Theme, context: ToolRenderContext<any, WriteToolInput>) {
 			const record = records.get(context.toolCallId);
 			if (!config.enabled || !record?.patch) return new Text("Wrote file", 0, 0);
-			const activeHighlighter = kickHighlighter(config, context.invalidate);
+			const activeHighlighter = highlighters.get(config, context.invalidate);
 			return createDiffView({
 				patch: record.patch,
 				filePath: record.filePath,

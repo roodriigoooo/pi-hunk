@@ -12,7 +12,7 @@ import {
 	tintBgAnsi,
 	type WordHighlight,
 } from "./config";
-import { displayPath } from "./paths";
+import { displayPath, fileKey } from "./paths";
 
 export type Highlighter = HighlighterGeneric<string, string>;
 
@@ -43,6 +43,61 @@ export type ParsedPatch = {
 	newFile?: string;
 	hunks: ParsedHunk[];
 };
+
+export type PatchLineLocation = {
+	filePath?: string;
+	oldLine?: number;
+	newLine?: number;
+};
+
+export type PatchLineAddress = {
+	hunkIndex: number;
+	lineIndex: number;
+	kind: DiffLine["kind"];
+	oldLine?: number;
+	newLine?: number;
+};
+
+export type DiffLineAnnotation = {
+	text: string;
+	detail?: string;
+	author?: string;
+	label?: string;
+};
+
+export type DiffLineAnnotations = ReadonlyMap<string, readonly DiffLineAnnotation[]>;
+
+export function patchLineAddressKey(address: Pick<PatchLineAddress, "hunkIndex" | "lineIndex">): string {
+	return `${address.hunkIndex}:${address.lineIndex}`;
+}
+
+function patchMatchesFile(parsed: ParsedPatch, filePath: string | undefined, cwd: string | undefined): boolean {
+	if (!filePath || !cwd) return true;
+	const target = fileKey(filePath, cwd);
+	return [parsed.newFile, parsed.oldFile].some((patchFile) => fileKey(patchFile, cwd) === target);
+}
+
+export function findPatchLineAddress(parsed: ParsedPatch, location: PatchLineLocation, cwd?: string): PatchLineAddress | undefined {
+	if (!patchMatchesFile(parsed, location.filePath, cwd)) return undefined;
+	const findBy = (side: "newLine" | "oldLine") => {
+		const target = location[side];
+		if (target === undefined) return undefined;
+		for (let hunkIndex = 0; hunkIndex < parsed.hunks.length; hunkIndex++) {
+			const hunk = parsed.hunks[hunkIndex];
+			for (let lineIndex = 0; lineIndex < hunk.lines.length; lineIndex++) {
+				const line = hunk.lines[lineIndex];
+				if (line[side] !== target) continue;
+				return { hunkIndex, lineIndex, kind: line.kind, oldLine: line.oldLine, newLine: line.newLine } satisfies PatchLineAddress;
+			}
+		}
+		return undefined;
+	};
+	return findBy("newLine") ?? findBy("oldLine");
+}
+
+function parseFileHeader(raw: string): string {
+	return raw.slice(4).trim().replace(/\t.*$/, "");
+}
 
 function parseHunkHeader(header: string): { oldStart: number; newStart: number } | undefined {
 	const m = /^@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(header);
@@ -106,11 +161,11 @@ export function parseUnifiedPatch(patch: string): ParsedPatch {
 
 	for (const raw of rawLines) {
 		if (raw.startsWith("--- ")) {
-			parsed.oldFile = raw.slice(4).trim();
+			parsed.oldFile = parseFileHeader(raw);
 			continue;
 		}
 		if (raw.startsWith("+++ ")) {
-			parsed.newFile = raw.slice(4).trim();
+			parsed.newFile = parseFileHeader(raw);
 			continue;
 		}
 		if (raw.startsWith("@@")) {
@@ -156,13 +211,14 @@ function countStats(parsed: ParsedPatch): { added: number; removed: number; file
 	return { added, removed, files: 1, hunks: parsed.hunks.length };
 }
 
-function filteredHunkLines(hunk: ParsedHunk, config: HunkConfig): Array<DiffLine | { kind: "skip"; count: number }> {
+function filteredHunkLines(hunk: ParsedHunk, config: HunkConfig, hunkIndex = 0, annotatedLineKeys?: ReadonlySet<string>): Array<DiffLine | { kind: "skip"; count: number }> {
 	if (!config.compactUnchanged) return hunk.lines;
 	const changed = new Set<number>();
 	for (let i = 0; i < hunk.lines.length; i++) {
 		if (hunk.lines[i].kind === "add" || hunk.lines[i].kind === "remove") {
 			for (let j = Math.max(0, i - config.contextRadius); j <= Math.min(hunk.lines.length - 1, i + config.contextRadius); j++) changed.add(j);
 		}
+		if (annotatedLineKeys?.has(patchLineAddressKey({ hunkIndex, lineIndex: i }))) changed.add(i);
 	}
 	const out: Array<DiffLine | { kind: "skip"; count: number }> = [];
 	let skipped = 0;
@@ -316,6 +372,20 @@ function hunkFooter(config: HunkConfig, theme: Theme, hasLiveSession: boolean): 
 	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/hunk review")} opens review state ${theme.fg("dim", "·")} ${theme.fg("muted", "/hunk send")} attaches it${toolHint}`];
 }
 
+function annotationText(annotation: DiffLineAnnotation): string {
+	const text = annotation.text.replace(/\s+/g, " ").trim();
+	const detail = annotation.detail?.replace(/\s+/g, " ").trim();
+	const author = annotation.author?.replace(/\s+/g, " ").trim();
+	return `${author ? `${author}: ` : ""}${text}${detail ? ` (${detail})` : ""}`;
+}
+
+function renderLineAnnotations(annotations: readonly DiffLineAnnotation[] | undefined, theme: Theme): string {
+	if (!annotations?.length) return "";
+	const label = annotations[0].label ?? "note";
+	const body = annotations.map(annotationText).join(theme.fg("dim", " · "));
+	return ` ${theme.fg("dim", "│")} ${theme.fg("accent", label)} ${body}`;
+}
+
 // ============================================================================
 // DiffView — config + patch + theme + highlighter → rendered lines
 // ============================================================================
@@ -329,10 +399,11 @@ export type DiffViewInput = {
 	highlighter: Highlighter | undefined;
 	theme: Theme;
 	liveSession?: boolean;
+	annotations?: DiffLineAnnotations;
 };
 
 export function renderDiffLines(input: DiffViewInput): string[] {
-	const { patch, filePath, cwd, title, config, highlighter, theme, liveSession } = input;
+	const { patch, filePath, cwd, title, config, highlighter, theme, liveSession, annotations } = input;
 	const parsed = parseUnifiedPatch(patch);
 	const stats = countStats(parsed);
 	const lang = getLanguageFromPath(filePath) ?? "text";
@@ -358,9 +429,11 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 	const lineNoMode = config.lineNumbers;
 	const isChanged = (item: DiffLine) => item.kind === "add" || item.kind === "remove";
 
+	const annotatedLineKeys = annotations ? new Set(annotations.keys()) : undefined;
 	let rendered = 0;
 	let truncated = false;
-	for (const hunk of parsed.hunks) {
+	for (let hunkIndex = 0; hunkIndex < parsed.hunks.length; hunkIndex++) {
+		const hunk = parsed.hunks[hunkIndex];
 		if (rendered >= config.maxRenderedLines) {
 			truncated = true;
 			break;
@@ -368,7 +441,7 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 		const sides = tokenizeHunkSides(hunk, highlighter, lang, shikiTheme);
 		lines.push(hunkCaption(hunk, filePath, cwd, theme));
 		rendered++;
-		for (const item of filteredHunkLines(hunk, config)) {
+		for (const item of filteredHunkLines(hunk, config, hunkIndex, annotatedLineKeys)) {
 			if (rendered >= config.maxRenderedLines) {
 				truncated = true;
 				break;
@@ -398,7 +471,9 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 			const lineAnsi = changed && config.lineHighlight === "tint" ? `${tintBgAnsi(side)}${sideAnsi}` : sideAnsi;
 			const tokens = tokensForLine(item, hunk, sides);
 			const code = renderCodeLine(item.text, tokens, theme, config, side, ranges, lineAnsi);
-			lines.push(`${marker} ${nums}${signStyled} ${code}`);
+			const lineIndex = hunk.lines.indexOf(item);
+			const noteMargin = lineIndex >= 0 ? renderLineAnnotations(annotations?.get(patchLineAddressKey({ hunkIndex, lineIndex })), theme) : "";
+			lines.push(`${marker} ${nums}${signStyled} ${code}${noteMargin}`);
 			rendered++;
 		}
 		if (truncated) break;
