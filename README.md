@@ -6,7 +6,7 @@ A pi extension that replaces pi's default `write` and `edit` tool output with Sh
 
 ## Demo
 
-https://github.com/user-attachments/assets/ced59b29-3aac-4f36-bd4a-d19a75016cc9
+https://github.com/user-attachments/assets/d204fc5e-8716-4fbe-96a5-debeaa589fa5
 
 ## Two halves
 
