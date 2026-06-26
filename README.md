@@ -4,6 +4,10 @@
 
 A pi extension that replaces pi's default `write` and `edit` tool output with Shiki-highlighted, word-emphasised terminal diffs, and adds a read-only bridge so a human can review those changes in a live [Hunk](https://github.com/modem-dev/hunk) session and attach their inline review state to the agent.
 
+## Demo
+
+https://github.com/user-attachments/assets/ced59b29-3aac-4f36-bd4a-d19a75016cc9
+
 ## Two halves
 
 1. **Diff renderer.** Every `write` and `edit` result renders through pi-hunk with Shiki syntax tokenisation, word-level highlights via `diffWordsWithSpace`, compact folding of unchanged regions, line numbers, hunk captions, changed-line gutter bars, and a bordered file header.
