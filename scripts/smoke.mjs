@@ -233,6 +233,12 @@ process.exit(2);
 	assert.ok(tools.has("edit"), "edit tool registered");
 	assert.ok(tools.has("hunk_review_notes"), "read-only review tool registered");
 	assert.ok(commands.has("hunk"), "/hunk command registered");
+	const hunkCommand = commands.get("hunk");
+	const rootCompletions = hunkCommand.getArgumentCompletions("");
+	assert.ok(rootCompletions.some((item) => item.value === "on"), "/hunk on completion registered");
+	assert.ok(rootCompletions.some((item) => item.value === "off"), "/hunk off completion registered");
+	assert.equal(hunkCommand.getArgumentCompletions("auto").find((item) => item.label === "on")?.value, "auto on");
+	assert.equal(hunkCommand.getArgumentCompletions("auto on").find((item) => item.label === "on")?.value, "auto on");
 
 	const ctx = makeCtx(tmp, ui, true);
 	for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start", reason: "startup" }, ctx);
@@ -285,7 +291,7 @@ process.exit(2);
 	assert.match(reviewPlain, /tighten the greeting/);
 	assert.doesNotMatch(reviewPlain, /Recent Hunk diff:/);
 
-	await commands.get("hunk").handler("auto on", ctx);
+	await hunkCommand.handler("on", ctx);
 	const autoResults = [];
 	for (const handler of handlers.get("before_agent_start") ?? []) {
 		const result = await handler({ type: "before_agent_start", prompt: "continue" }, ctx);
@@ -295,14 +301,14 @@ process.exit(2);
 	assert.match(autoResults[0].message.content, /tighten the greeting/);
 	assert.match(autoResults[0].message.content, /keep the file tiny/);
 
-	await commands.get("hunk").handler("send", ctx);
+	await hunkCommand.handler("send", ctx);
 	assert.equal(sentUserMessages.length, 1);
 	assert.match(sentUserMessages[0].content, /tighten the greeting/);
 	assert.equal(sentUserMessages[0].options.deliverAs, "followUp");
 
 	// /hunk review pairs notes with recent edits (read-only, human-facing).
 	const reviewBefore = configureSnapshots.length;
-	await commands.get("hunk").handler("review", ctx);
+	await hunkCommand.handler("review", ctx);
 	const reviewSnap = configureSnapshots.slice(reviewBefore).join("\n");
 	assert.match(reviewSnap, /Hunk review/, "/hunk review renders review header");
 	// both smoke notes are on smoke.ts newLine 1, which the edit above touched
@@ -319,7 +325,7 @@ process.exit(2);
 	assert.equal(finalFile, "hello hunk\n");
 
 	const configureStart = configureSnapshots.length;
-	await commands.get("hunk").handler("configure", ctx);
+	await hunkCommand.handler("configure", ctx);
 	const cfgSnapshots = configureSnapshots.slice(configureStart);
 	assert.ok(cfgSnapshots[0].includes("Hunk Configuration"), "configure opens with title");
 	assert.ok(cfgSnapshots[0].includes("Side colors & words"), "configure shows group nav");

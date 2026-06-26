@@ -18,7 +18,7 @@ pi install npm:@roodriigoooo/pi-hunk
 Then restart pi (or run `/reload`). To install a pinned git ref instead:
 
 ```bash
-pi install git:github.com/roodriigoooo/pi-hunk@v0.3.0
+pi install git:github.com/roodriigoooo/pi-hunk@v0.5.0
 ```
 
 You need the `hunk` CLI on your PATH only if you use the review bridge. The diff renderer works on its own.
@@ -27,7 +27,7 @@ You need the `hunk` CLI on your PATH only if you use the review bridge. The diff
 
 - `/hunk status` probes `hunk session get --repo <cwd>` and reports whether a live Hunk session is attached.
 - `/hunk send` reads `hunk session comment list --repo <cwd> --type user --json`, shapes the open review state by file and line, and attaches it to the agent as a follow-up when idle or as steering when streaming.
-- `/hunk auto on|off` opts in to automatic pickup before each agent turn. Pickup is scoped to notes that overlap a recent edit by file and line, and unchanged duplicate review states are not re-attached.
+- `/hunk on|off` opts in/out of automatic pickup before each agent turn. Pickup is scoped to notes that overlap a recent edit by file and line, and unchanged duplicate review states are not re-attached. `/hunk auto on|off` remains accepted for compatibility.
 - `/hunk review` opens a read-only view that pairs each open user note with whether a recent edit touched its line (`✓ touched`) or not (`○ open`). It never sends anything to the agent.
 - `/hunk configure` opens the configuration TUI.
 

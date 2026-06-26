@@ -359,7 +359,7 @@ export interface ReviewBridge {
 	 * are not re-injected.
 	 */
 	pickup(cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<{ result: ReviewNotesResult; inject: boolean }>;
-	/** Forget the last-seen signature (e.g. after `/hunk auto off`). */
+	/** Forget the last-seen signature (e.g. after `/hunk off`). */
 	resetSignature(): void;
 	/** Render notes through the shared visual language. */
 	renderNotesLines(

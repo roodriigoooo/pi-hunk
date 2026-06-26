@@ -22,13 +22,14 @@ import { displayPath, resolveUserPath } from "./paths";
 import { createRenderRecordStore, type RenderRecord } from "./render-records";
 
 // ============================================================================
-// /hunk command dispatch (status · send · auto on|off)
+// /hunk command dispatch (status · send · on|off · review · configure)
 // ============================================================================
 
 const HUNK_SUBCOMMANDS: AutocompleteItem[] = [
 	{ value: "status", label: "status", description: "Show pi-hunk and live Hunk session status." },
 	{ value: "send", label: "send", description: "Attach open human review notes to the agent." },
-	{ value: "auto", label: "auto", description: "Toggle automatic review-note pickup (on|off)." },
+	{ value: "on", label: "on", description: "Enable auto review pickup before agent turns." },
+	{ value: "off", label: "off", description: "Disable auto review pickup." },
 	{ value: "review", label: "review", description: "Open read-only review pairing notes with recent edits." },
 	{ value: "configure", label: "configure", description: "Open the configuration TUI." },
 ];
@@ -40,10 +41,10 @@ function hunkArgumentCompletions(prefix: string): AutocompleteItem[] {
 	if (first === "auto") {
 		const sub = rest.join("").trim();
 		const opts: AutocompleteItem[] = [
-			{ value: "on", label: "on", description: "Enable auto review pickup before agent turns." },
-			{ value: "off", label: "off", description: "Disable auto review pickup." },
+			{ value: "auto on", label: "on", description: "Enable auto review pickup before agent turns." },
+			{ value: "auto off", label: "off", description: "Disable auto review pickup." },
 		];
-		return sub ? opts.filter((o) => o.value.startsWith(sub)) : opts;
+		return sub ? opts.filter((o) => o.label.startsWith(sub)) : opts;
 	}
 	return HUNK_SUBCOMMANDS.filter((c) => c.value.startsWith(first));
 }
@@ -62,6 +63,8 @@ async function handleHunkCommand(
 ) {
 	const config = getConfig();
 	const [sub = "status", arg = ""] = args.trim().split(/\s+/).filter(Boolean);
+	const wantsAutoOn = sub === "on" || (sub === "auto" && arg === "on");
+	const wantsAutoOff = sub === "off" || (sub === "auto" && arg === "off");
 	if (!config.hunk.enabled && sub !== "status" && sub !== "help") {
 		ctx.ui.notify("Hunk integration is disabled in config.", "warning");
 		return;
@@ -73,26 +76,26 @@ async function handleHunkCommand(
 		const auto = config.hunk.autoReviewNotes ? "on" : "off";
 		if (live) {
 			const id = stringOr(session?.id ?? session?.sessionId ?? session?.session?.id);
-			ctx.ui.notify(`pi-hunk is active. Recent diffs: ${recordCount()}. Auto review pickup: ${auto}. Live Hunk session${id ? `: ${id}` : " detected"}. Commands: /hunk status, /hunk send, /hunk auto on|off, /hunk review, /hunk configure.`, "info");
+			ctx.ui.notify(`pi-hunk is active. Recent diffs: ${recordCount()}. Auto review pickup: ${auto}. Live Hunk session${id ? `: ${id}` : " detected"}. Commands: /hunk status, /hunk send, /hunk on|off, /hunk review, /hunk configure.`, "info");
 		} else {
 			ctx.ui.notify(`pi-hunk is active. Recent diffs: ${recordCount()}. Auto review pickup: ${auto}. No live Hunk session. Open another terminal in this repo and run: hunk diff --watch`, "info");
 		}
 		return;
 	}
+	if (wantsAutoOn) {
+		setConfig(mergeConfig(config, { hunk: { autoReviewNotes: true, autoReviewNotesMin: 1 } }));
+		resetAutoSignature();
+		ctx.ui.notify("Hunk auto review pickup enabled. New relevant notes attach before the next agent turn; no turn starts by itself.", "info");
+		return;
+	}
+	if (wantsAutoOff) {
+		setConfig(mergeConfig(config, { hunk: { autoReviewNotes: false } }));
+		resetAutoSignature();
+		ctx.ui.notify("Hunk auto review pickup disabled.", "info");
+		return;
+	}
 	if (sub === "auto") {
-		if (arg === "on") {
-			setConfig(mergeConfig(config, { hunk: { autoReviewNotes: true, autoReviewNotesMin: 1 } }));
-			resetAutoSignature();
-			ctx.ui.notify("Hunk auto review pickup enabled. New relevant notes attach before the next agent turn; no turn starts by itself.", "info");
-			return;
-		}
-		if (arg === "off") {
-			setConfig(mergeConfig(config, { hunk: { autoReviewNotes: false } }));
-			resetAutoSignature();
-			ctx.ui.notify("Hunk auto review pickup disabled.", "info");
-			return;
-		}
-		ctx.ui.notify(`Auto review pickup is ${config.hunk.autoReviewNotes ? "on" : "off"}. Use /hunk auto on or /hunk auto off.`, "info");
+		ctx.ui.notify(`Auto review pickup is ${config.hunk.autoReviewNotes ? "on" : "off"}. Use /hunk on or /hunk off.`, "info");
 		return;
 	}
 	if (sub === "send") {
@@ -152,7 +155,7 @@ async function handleHunkCommand(
 		});
 		return;
 	}
-	ctx.ui.notify(`Unknown /hunk command: ${sub}. Try /hunk status, /hunk send, /hunk auto on|off, /hunk review, or /hunk configure.`, "warning");
+	ctx.ui.notify(`Unknown /hunk command: ${sub}. Try /hunk status, /hunk send, /hunk on|off, /hunk review, or /hunk configure.`, "warning");
 }
 
 // ============================================================================
@@ -203,7 +206,7 @@ export default async function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("hunk", {
-		description: "pi-hunk diff renderer and read-only Hunk review bridge (/hunk status, /hunk send, /hunk auto on|off, /hunk review, /hunk configure)",
+		description: "pi-hunk diff renderer and read-only Hunk review bridge (/hunk status, /hunk send, /hunk on|off, /hunk review, /hunk configure)",
 		getArgumentCompletions: (argumentPrefix: string) => hunkArgumentCompletions(argumentPrefix),
 		handler: async (args, ctx) => {
 			const [sub] = args.trim().split(/\s+/).filter(Boolean);
