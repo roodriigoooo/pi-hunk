@@ -5,3 +5,7 @@ node_modules/
 .pi/huff.json
 .pi/huff/
 PLAN.md
+
+# Local demo recording scripts/artifacts
+/docs/demo-script.*
+/docs/demo-assets/

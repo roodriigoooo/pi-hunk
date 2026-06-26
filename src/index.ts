@@ -211,6 +211,10 @@ export default async function (pi: ExtensionAPI) {
 		handler: async (args, ctx) => {
 			const [sub] = args.trim().split(/\s+/).filter(Boolean);
 			if (sub === "configure") {
+				if (!ctx.isIdle()) {
+					ctx.ui.notify("/hunk configure cannot open while the agent is responding. Wait for the response to finish, then run it again.", "warning");
+					return;
+				}
 				await openHunkConfig(
 					ctx,
 					() => config,

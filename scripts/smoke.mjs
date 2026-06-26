@@ -324,6 +324,11 @@ process.exit(2);
 	const finalFile = await readFile(path.join(tmp, "smoke.ts"), "utf8");
 	assert.equal(finalFile, "hello hunk\n");
 
+	const blockedConfigureStart = configureSnapshots.length;
+	await hunkCommand.handler("configure", makeCtx(tmp, ui, false));
+	assert.equal(configureSnapshots.length, blockedConfigureStart, "configure does not open while agent is responding");
+	assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("cannot open while the agent is responding")), "configure warns while agent is responding");
+
 	const configureStart = configureSnapshots.length;
 	await hunkCommand.handler("configure", ctx);
 	const cfgSnapshots = configureSnapshots.slice(configureStart);
