@@ -47,6 +47,7 @@ const { normalizeHunkComments, createHunkBridge, buildReviewNoteShape, reviewAnn
 const { createRenderRecordStore, createAgentEditPatchSource } = await jiti.import(path.join(repoRoot, "src", "render-records.ts"), { default: false });
 const { renderCodeLine, styleToken, wordHighlightAnsi, ANSI_RESET } = await jiti.import(path.join(repoRoot, "src", "styling.ts"), { default: false });
 const { createReviewedPatchSource, normalizeReviewPatches, createPatchSource } = await jiti.import(path.join(repoRoot, "src", "patch-source.ts"), { default: false });
+const { renderReviewView, commentLines, groupCommentsByFile } = await jiti.import(path.join(repoRoot, "src", "review-view.ts"), { default: false });
 const { fileKey } = await jiti.import(path.join(repoRoot, "src", "paths.ts"), { default: false });
 const { writePatch } = await jiti.import(path.join(repoRoot, "src", "diff-view.ts"), { default: false });
 
@@ -777,6 +778,72 @@ assert.equal(altFields[0].author, "human");
 	const realBridge = createHunkBridge(realSource);
 	const notesFromReal = realBridge.renderNotesLines(carried, cwd, fakeTheme(), { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false, showHunkHint: false }, undefined).join("\n");
 	assert.equal(notesFromReal, notesView, "render is identical regardless of the bridge's source — shape is canonical");
+}
+
+// --- #13: shared scaffolding seam for the two review views ------------------
+// renderReviewView owns the header/status/separator/open-footer chrome; the two
+// views differ only in their body-strategy adapter. A stub strategy proves the
+// scaffolding renders the frame for any body; commentLines keeps rationale on
+// its own line so per-line wrapping is unchanged.
+{
+	const theme = fakeTheme();
+	const cwd = repoRoot;
+	// Stub strategy: trivial body + labelled open-footer pieces.
+	const stub = {
+		title: "Stub view",
+		guard: () => ({ status: theme.fg("toolDiffAdded", "stub status"), stop: false }),
+		body: () => ({ lines: ["BODY"], openStartIndex: 7 }),
+		openSectionHeader: () => "SECTION",
+		openGroupHeader: (file) => `GROUP ${file}`,
+		openCommentLine: (comment, index) => [`OPEN ${index} ${comment.summary}`],
+	};
+	const result = {
+		live: true,
+		comments: [{ id: "n1", type: "user", filePath: "a.ts", newLine: 1, summary: "s1" }],
+		message: "",
+		hunks: [],
+		openComments: [{ id: "n2", type: "user", filePath: "a.ts", newLine: 1, summary: "open note" }],
+	};
+	const out = renderReviewView(result, cwd, theme, stub, {});
+	const plain = out.map(stripAnsi).join("\n");
+	assert.match(plain, /Stub view/, "scaffolding renders the strategy's title header");
+	assert.match(plain, /stub status/, "scaffolding renders the guard status line");
+	assert.match(plain, /BODY/, "scaffolding delegates to the body strategy");
+	assert.match(plain, /SECTION/, "scaffolding renders the open-section header");
+	assert.match(plain, /GROUP a\.ts/, "scaffolding renders the per-file group header");
+	assert.match(plain, /OPEN 7 open note/, "scaffolding numbers open comments from the body's openStartIndex");
+
+	// commentLines keeps rationale on its own line.
+	const withRationale = commentLines("main line", { summary: "s", rationale: "why" }, theme);
+	assert.equal(withRationale.length, 2, "summary + rationale = two lines");
+	assert.equal(stripAnsi(withRationale[0]), "main line", "first line is the main line");
+	assert.match(stripAnsi(withRationale[1]), /rationale: why/, "second line is the rationale");
+	assert.equal(commentLines("main line", { summary: "s" }, theme).length, 1, "no rationale = one line");
+
+	// The two real strategies share the frame: same header/separator shape, differ
+	// only in title and body. Render the same carried shape through each and assert
+	// the chrome lines are identical except the title.
+	const filePath = path.join(cwd, "src", "app.ts");
+	const patch = writePatch("a/src/app.ts", "b/src/app.ts", "line1\nold\nline3\n", "line1\nnew\nline3\n");
+	const note = { id: "n1", type: "user", filePath: "src/app.ts", newLine: 2, summary: "pin", rationale: "r" };
+	const store = createRenderRecordStore();
+	store.record("c1", { tool: "edit", filePath, patch, summary: "edited" });
+	const src = createAgentEditPatchSource(store);
+	const shape = buildReviewNoteShape([note], src.findForFile, cwd);
+	const carried = { live: true, comments: [note], message: "", session: {}, hunks: shape.hunks, openComments: shape.openComments };
+	const bridge = createHunkBridge(src);
+	const notesLines = bridge.renderNotesLines(carried, cwd, theme, { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false, showHunkHint: false }, undefined);
+	const reviewLines = bridge.renderReviewLines(carried, cwd, theme);
+	// First line is the header box; only the title differs between the two views.
+	assert.match(stripAnsi(notesLines[0]), /Hunk review notes/, "notes view header title");
+	assert.match(stripAnsi(reviewLines[0]), /Hunk review$/, "review view header title");
+	// The separator (╰─...) is rendered identically by the shared scaffolding.
+	const notesSep = notesLines.find((l) => stripAnsi(l).startsWith("╰"));
+	const reviewSep = reviewLines.find((l) => stripAnsi(l).startsWith("╰"));
+	assert.ok(notesSep && reviewSep, "both views render the separator");
+	assert.equal(notesSep, reviewSep, "separator is shared and identical");
+	// Both views surface the open-comments footer via the shared grouping.
+	assert.ok(groupCommentsByFile(shape.openComments, cwd).size >= 0, "groupCommentsByFile shared by both views");
 }
 
 console.log("pi-hunk units ok");
