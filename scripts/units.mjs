@@ -439,16 +439,21 @@ assert.equal(altFields[0].author, "human");
 		patch: writePatch("a/src/app.ts", "b/src/app.ts", "line1\nline2\nold\nold\nold\nline6\n", "line1\nline2\nnewA\nnewB\nnewC\nline6\n"),
 		summary: "edited app.ts",
 	});
-	const bridge = createHunkBridge(createAgentEditPatchSource(store));
+	const src = createAgentEditPatchSource(store);
+	const bridge = createHunkBridge(src);
 
+	const comments = [
+		{ id: "n1", type: "user", filePath: "src/app.ts", newLine: 4, summary: "on the edit", rationale: "why" },
+		{ id: "n2", type: "user", filePath: "src/other.ts", newLine: 99, summary: "untouched file" },
+	];
+	const shape = buildReviewNoteShape(comments, src.findForFile, cwd);
 	const result = {
 		live: true,
 		session: { id: "s" },
-		comments: [
-			{ id: "n1", type: "user", filePath: "src/app.ts", newLine: 4, summary: "on the edit", rationale: "why" },
-			{ id: "n2", type: "user", filePath: "src/other.ts", newLine: 99, summary: "untouched file" },
-		],
+		comments,
 		message: "",
+		hunks: shape.hunks,
+		openComments: shape.openComments,
 	};
 	const lines = bridge.renderReviewLines(result, cwd, fakeTheme());
 	const plain = lines.map(stripAnsi).join("\n");
@@ -475,15 +480,20 @@ assert.equal(altFields[0].author, "human");
 		patch: writePatch("a/src/app.ts", "b/src/app.ts", "a\nb\nc\nd\ne\n", "a\nb\nc\n"),
 		summary: "deleted lines 4-5",
 	});
-	const bridge = createHunkBridge(createAgentEditPatchSource(store));
+	const src = createAgentEditPatchSource(store);
+	const bridge = createHunkBridge(src);
 
+	const comments = [
+		{ id: "n1", type: "user", filePath: "src/app.ts", oldLine: 4, summary: "on the removed line" },
+	];
+	const shape = buildReviewNoteShape(comments, src.findForFile, cwd);
 	const result = {
 		live: true,
 		session: { id: "s" },
-		comments: [
-			{ id: "n1", type: "user", filePath: "src/app.ts", oldLine: 4, summary: "on the removed line" },
-		],
+		comments,
 		message: "",
+		hunks: shape.hunks,
+		openComments: shape.openComments,
 	};
 	const lines = bridge.renderReviewLines(result, cwd, fakeTheme());
 	const idx = lines.findIndex((l) => stripAnsi(l).includes("on the removed line"));
@@ -719,6 +729,54 @@ assert.equal(altFields[0].author, "human");
 	const bridge = createHunkBridge(createPatchSource(reviewedSource, agentSource));
 	assert.equal(bridge.renderReviewLines.length, 3, "renderReviewLines(result, cwd, theme) — findRecent no longer threaded");
 	assert.equal(bridge.renderNotesLines.length, 5, "renderNotesLines(result, cwd, theme, config, highlighter) — findRecent no longer threaded");
+}
+
+// --- #12: review-note shape canonical in ReviewNotesResult --------------------
+// Renderers consume result.hunks/openComments (the carried shape) and do not
+// re-build via buildReviewNoteShape. A result with a fixed shape renders its
+// pinned hunk even when the bridge's source is empty (which would yield no
+// hunks if the renderer re-built). Proves prompt and render derive from one
+// shape instance built in readNotes/pickup.
+{
+	const cwd = repoRoot;
+	const filePath = path.join(cwd, "src", "app.ts");
+	const patch = writePatch("a/src/app.ts", "b/src/app.ts", "line1\nline2\nold\nold\nline5\n", "line1\nline2\nnewA\nnewB\nline5\n");
+	const note = { id: "n1", type: "user", filePath: "src/app.ts", newLine: 4, summary: "pin on new row" };
+
+	// Build the canonical shape once from a real source.
+	const store = createRenderRecordStore();
+	store.record("c1", { tool: "edit", filePath, patch, summary: "edited app.ts" });
+	const realSource = createAgentEditPatchSource(store);
+	const shape = buildReviewNoteShape([note], realSource.findForFile, cwd);
+	assert.equal(shape.hunks.length, 1, "shape pins the note onto a hunk");
+
+	// Carry that shape on the result. The bridge is wired to an EMPTY source, so
+	// if a renderer re-called buildReviewNoteShape it would find no patch and
+	// drop the note into openComments.
+	const carried = {
+		live: true,
+		comments: [note],
+		message: "",
+		session: {},
+		hunks: shape.hunks,
+		openComments: shape.openComments,
+	};
+	const emptyBridge = createHunkBridge({ findForFile: () => undefined });
+
+	const notesView = emptyBridge.renderNotesLines(carried, cwd, fakeTheme(), { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false, showHunkHint: false }, undefined).join("\n");
+	assert.match(notesView, /pin on new row/, "notes view renders the carried-shape hunk even when the source is empty");
+	assert.doesNotMatch(notesView, /notes without recent hunk/, "carried-shape note is pinned, not open");
+
+	const reviewView = emptyBridge.renderReviewLines(carried, cwd, fakeTheme()).join("\n");
+	assert.match(reviewView, /pin on new row/, "review view renders the carried-shape hunk even when the source is empty");
+	assert.match(reviewView, /touched/i, "review view counts the carried-shape note as touched");
+	assert.doesNotMatch(reviewView, /\bopen\b.*pin on new row/, "carried-shape note is not listed as open");
+
+	// Same carried shape renders identically regardless of which source the
+	// bridge holds — the source is not consulted by the render path.
+	const realBridge = createHunkBridge(realSource);
+	const notesFromReal = realBridge.renderNotesLines(carried, cwd, fakeTheme(), { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false, showHunkHint: false }, undefined).join("\n");
+	assert.equal(notesFromReal, notesView, "render is identical regardless of the bridge's source — shape is canonical");
 }
 
 console.log("pi-hunk units ok");
