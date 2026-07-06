@@ -13,6 +13,7 @@ import {
 } from "./diff-view";
 import { displayPath, fileKey } from "./paths";
 import type { PatchEntry, PatchSource, RefreshablePatchSource } from "./patch-source";
+import { commentLocation, groupCommentsByFile, commentLines, renderReviewView, type ReviewViewStrategy } from "./review-view";
 
 // ============================================================================
 // Types
@@ -42,6 +43,10 @@ export type ReviewNoteHunk = {
 	summary: string;
 	hunkIndex: number;
 	header: string;
+	/** The unified-diff patch this hunk was pinned against. Carried on the
+	 *  shape so renderers draw the hunk from the shape itself, not by re-asking
+	 *  the patch source — prompt and render then derive from one shape instance. */
+	patch: string;
 	lines: ReviewNoteLine[];
 };
 
@@ -195,24 +200,6 @@ export function normalizeHunkComments(payload: any): HunkComment[] {
 // Note shaping — pinned onto the patch a PatchSource says to use
 // ============================================================================
 
-function commentLocation(c: Pick<HunkComment, "oldLine" | "newLine">): string {
-	if (c.newLine !== undefined && c.oldLine !== undefined) return `new:${c.newLine} / old:${c.oldLine}`;
-	if (c.newLine !== undefined) return `new:${c.newLine}`;
-	if (c.oldLine !== undefined) return `old:${c.oldLine}`;
-	return "file";
-}
-
-function groupCommentsByFile(comments: HunkComment[], cwd: string): Map<string, HunkComment[]> {
-	const grouped = new Map<string, HunkComment[]>();
-	for (const comment of comments) {
-		const file = displayPath(comment.filePath, cwd);
-		const list = grouped.get(file) ?? [];
-		list.push(comment);
-		grouped.set(file, list);
-	}
-	return grouped;
-}
-
 function reviewNotesSignature(comments: HunkComment[], cwd: string): string {
 	return JSON.stringify(
 		comments.map((comment) => ({
@@ -313,7 +300,7 @@ export function buildReviewNoteShape(comments: HunkComment[], findForFile: (file
 		const hunkKey = `${fileKey(entry.filePath, cwd)}:${address.hunkIndex}`;
 		let hunk = hunks.get(hunkKey);
 		if (!hunk) {
-			hunk = { filePath: entry.filePath, summary: entry.summary, hunkIndex: address.hunkIndex, header: parsedHunk.header, lines: [] };
+			hunk = { filePath: entry.filePath, summary: entry.summary, hunkIndex: address.hunkIndex, header: parsedHunk.header, patch: entry.patch, lines: [] };
 			hunks.set(hunkKey, hunk);
 			lineMaps.set(hunkKey, new Map());
 		}
@@ -353,6 +340,78 @@ export function notesRelevantToRecords(notes: HunkComment[], findForFile: (fileP
 		return entry ? noteOverlapsEntry(note, entry, cwd) : false;
 	});
 }
+
+function touchedCount(shape: ReviewNoteShape): number {
+	return shape.hunks.reduce((count, hunk) => count + hunk.lines.reduce((inner, line) => inner + line.comments.length, 0), 0);
+}
+
+// --- notes view strategy: render diff hunks with annotations pinned to rows -----
+const notesViewStrategy: ReviewViewStrategy = {
+	title: "Hunk review notes",
+	guard(result, shape, theme) {
+		const touched = touchedCount(shape);
+		const status = result.live ? `${result.comments.length} user note${result.comments.length === 1 ? "" : "s"} · ${touched} pinned` : "no live session";
+		return { status: theme.fg(result.live ? "toolDiffAdded" : "warning", status), message: result.live && result.comments.length ? undefined : result.message, stop: !result.live || !result.comments.length };
+	},
+	body(result, shape, cwd, _theme, opts) {
+		const config = opts.config as HunkConfig;
+		const highlighter = opts.highlighter as Highlighter | undefined;
+		const configNoFooter = { ...config, showHunkHint: false };
+		const lines: string[] = [];
+		const renderedRecords = new Set<string>();
+		for (const hunk of shape.hunks) {
+			const recordKey = `${fileKey(hunk.filePath, cwd)}\0${hunk.patch}`;
+			if (renderedRecords.has(recordKey)) continue;
+			renderedRecords.add(recordKey);
+			const recordComments = result.comments.filter((comment) => fileKey(comment.filePath, cwd) === fileKey(hunk.filePath, cwd));
+			const entry: PatchEntry = { filePath: hunk.filePath, patch: hunk.patch, summary: hunk.summary };
+			const annotations = reviewAnnotationsForRecord(recordComments, entry, cwd);
+			lines.push(...renderDiffLines({ patch: hunk.patch, filePath: hunk.filePath, cwd, title: "review notes", config: configNoFooter, highlighter, theme: _theme, annotations }));
+		}
+		return { lines, openStartIndex: 1 };
+	},
+	openSectionHeader(theme) {
+		return `${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "notes without recent hunk")}`;
+	},
+	openGroupHeader(file, theme) {
+		return `${theme.fg("dim", "file")} ${theme.fg("muted", file)}`;
+	},
+	openCommentLine(comment, index, theme) {
+		return commentLines(`${theme.fg("warning", "○ open")} ${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary}`, comment, theme);
+	},
+};
+
+// --- review view strategy: render the touched/open pairing --------------------
+const reviewViewStrategy: ReviewViewStrategy = {
+	title: "Hunk review",
+	guard(result, shape, theme) {
+		if (!result.live) return { status: theme.fg("warning", "no live session"), message: result.message, stop: true };
+		if (!result.comments.length) return { status: theme.fg("muted", "no user notes"), stop: true };
+		const touched = touchedCount(shape);
+		const open = shape.openComments.length;
+		return { status: `${theme.fg("toolDiffAdded", `${touched} touched`)} ${theme.fg("dim", "·")} ${theme.fg("warning", `${open} open`)}`, stop: false };
+	},
+	body(_result, shape, cwd, theme, _opts) {
+		const lines: string[] = [];
+		let index = 1;
+		for (const hunk of shape.hunks) {
+			lines.push(`${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "notes")} ${theme.fg("dim", "·")} ${theme.fg("muted", `${displayPath(hunk.filePath, cwd)} ${hunk.header}`)}`);
+			for (const line of hunk.lines) {
+				for (const comment of line.comments) {
+					lines.push(...commentLines(`${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("toolDiffAdded", "✓ touched")} ${theme.fg("toolTitle", commentLocation(line.address))} ${theme.fg("dim", "—")} ${comment.summary}`, comment, theme));
+					index++;
+				}
+			}
+		}
+		return { lines, openStartIndex: index };
+	},
+	openGroupHeader(file, theme) {
+		return `${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "open notes")} ${theme.fg("dim", "·")} ${theme.fg("muted", file)}`;
+	},
+	openCommentLine(comment, index, theme) {
+		return commentLines(`${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("warning", "○ open")} ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary}`, comment, theme);
+	},
+};
 
 // ============================================================================
 // ReviewBridge — live session → semantic notes, with pickup/dedup policy
@@ -441,97 +500,11 @@ export function createHunkBridge(patchSource: PatchSource): ReviewBridge {
 		},
 
 		renderNotesLines(result, cwd, theme, config, highlighter) {
-			const lines: string[] = [];
-			lines.push(`${theme.fg("accent", "✦")} ${theme.fg("borderMuted", "╭─")} ${theme.fg("toolTitle", theme.bold("Hunk review notes"))}`);
-			if (!result) {
-				lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("muted", "No result details available.")}`);
-				lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-				return lines;
-			}
-			const shape = buildReviewNoteShape(result.comments, findForFile, cwd);
-			const touched = shape.hunks.reduce((count, hunk) => count + hunk.lines.reduce((inner, line) => inner + line.comments.length, 0), 0);
-			const status = result.live ? `${result.comments.length} user note${result.comments.length === 1 ? "" : "s"} · ${touched} pinned` : "no live session";
-			lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg(result.live ? "toolDiffAdded" : "warning", status)}`);
-			lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-			if (!result.live || !result.comments.length) {
-				lines.push(theme.fg("muted", result.message));
-				return lines;
-			}
-			const configNoFooter = { ...config, showHunkHint: false };
-			const renderedRecords = new Set<string>();
-			for (const hunk of shape.hunks) {
-				const record = findForFile(hunk.filePath, cwd);
-				const recordKey = record ? `${fileKey(record.filePath, cwd)}\0${record.patch}` : undefined;
-				if (!record || !recordKey || renderedRecords.has(recordKey)) continue;
-				renderedRecords.add(recordKey);
-				const recordComments = result.comments.filter((comment) => {
-					const commentRecord = findForFile(comment.filePath, cwd);
-					return commentRecord ? `${fileKey(commentRecord.filePath, cwd)}\0${commentRecord.patch}` === recordKey : false;
-				});
-				const annotations = reviewAnnotationsForRecord(recordComments, record, cwd);
-				lines.push(...renderDiffLines({ patch: record.patch, filePath: record.filePath, cwd, title: "review notes", config: configNoFooter, highlighter, theme, annotations }));
-			}
-			if (shape.openComments.length) {
-				lines.push(`${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "notes without recent hunk")}`);
-				let index = 1;
-				for (const [file, comments] of groupCommentsByFile(shape.openComments, cwd)) {
-					lines.push(`${theme.fg("dim", "file")} ${theme.fg("muted", file)}`);
-					for (const comment of comments) {
-						lines.push(`${theme.fg("warning", "○ open")} ${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary}`);
-						if (comment.rationale) lines.push(`   ${theme.fg("dim", "rationale:")} ${comment.rationale}`);
-						index++;
-					}
-				}
-			}
-			return lines;
+			return renderReviewView(result, cwd, theme, notesViewStrategy, { config, highlighter });
 		},
 
 		renderReviewLines(result, cwd, theme) {
-			const lines: string[] = [];
-			lines.push(`${theme.fg("accent", "✦")} ${theme.fg("borderMuted", "╭─")} ${theme.fg("toolTitle", theme.bold("Hunk review"))}`);
-			if (!result) {
-				lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("muted", "No result details available.")}`);
-				lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-				return lines;
-			}
-			if (!result.live) {
-				lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("warning", "no live session")}`);
-				lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-				lines.push(theme.fg("muted", result.message));
-				return lines;
-			}
-			if (!result.comments.length) {
-				lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("muted", "no user notes")}`);
-				lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-				return lines;
-			}
-			const shape = buildReviewNoteShape(result.comments, findForFile, cwd);
-			const touched = shape.hunks.reduce((count, hunk) => count + hunk.lines.reduce((inner, line) => inner + line.comments.length, 0), 0);
-			const open = shape.openComments.length;
-			lines.push(`${theme.fg("borderMuted", "│")} ${theme.fg("toolDiffAdded", `${touched} touched`)} ${theme.fg("dim", "·")} ${theme.fg("warning", `${open} open`)}`);
-			lines.push(theme.fg("borderMuted", "╰" + "─".repeat(32)));
-			let index = 1;
-			for (const hunk of shape.hunks) {
-				lines.push(`${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "notes")} ${theme.fg("dim", "·")} ${theme.fg("muted", `${displayPath(hunk.filePath, cwd)} ${hunk.header}`)}`);
-				for (const line of hunk.lines) {
-					for (const comment of line.comments) {
-						lines.push(`${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("toolDiffAdded", "✓ touched")} ${theme.fg("toolTitle", commentLocation(line.address))} ${theme.fg("dim", "—")} ${comment.summary}`);
-						if (comment.rationale) lines.push(`   ${theme.fg("dim", "rationale:")} ${comment.rationale}`);
-						index++;
-					}
-				}
-			}
-			if (shape.openComments.length) {
-				for (const [file, comments] of groupCommentsByFile(shape.openComments, cwd)) {
-					lines.push(`${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "open notes")} ${theme.fg("dim", "·")} ${theme.fg("muted", file)}`);
-					for (const comment of comments) {
-						lines.push(`${theme.fg("dim", String(index).padStart(2, " "))}. ${theme.fg("warning", "○ open")} ${theme.fg("toolTitle", commentLocation(comment))} ${theme.fg("dim", "—")} ${comment.summary}`);
-						if (comment.rationale) lines.push(`   ${theme.fg("dim", "rationale:")} ${comment.rationale}`);
-						index++;
-					}
-				}
-			}
-			return lines;
+			return renderReviewView(result, cwd, theme, reviewViewStrategy, {});
 		},
 	};
 }
