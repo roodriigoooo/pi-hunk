@@ -43,7 +43,8 @@ const { parseUnifiedPatch, renderDiffLines, findPatchLineAddress, patchLineAddre
 const { DEFAULT_CONFIG, TOKENIZE_MAX_LINE_LENGTH, TOKENIZE_TIME_LIMIT_MS, ansiFg } = await jiti.import(path.join(repoRoot, "src", "config.ts"), { default: false });
 const { applyHunkPreset, choicesForSpec, descriptionForSpec, hunkConfigGroups, hunkConfigPresets } = await jiti.import(path.join(repoRoot, "src", "config-spec.ts"), { default: false });
 const { createHighlighterCache } = await jiti.import(path.join(repoRoot, "src", "highlighter-cache.ts"), { default: false });
-const { normalizeHunkComments, createHunkBridge, buildReviewNoteShape, reviewAnnotationsForRecord } = await jiti.import(path.join(repoRoot, "src", "hunk-bridge.ts"), { default: false });
+const { normalizeHunkComments, createHunkBridge, buildReviewNoteShape, reviewAnnotationsForRecord, reviewedRefFromSession } = await jiti.import(path.join(repoRoot, "src", "hunk-bridge.ts"), { default: false });
+const { createHunkSessionRead, createLegacyHunkSessionRead } = await jiti.import(path.join(repoRoot, "src", "hunk-session-read.ts"), { default: false });
 const { createRenderRecordStore, createAgentEditPatchSource } = await jiti.import(path.join(repoRoot, "src", "render-records.ts"), { default: false });
 const { renderCodeLine, styleToken, wordHighlightAnsi, ANSI_RESET } = await jiti.import(path.join(repoRoot, "src", "styling.ts"), { default: false });
 const { createReviewedPatchSource, normalizeReviewPatches, createPatchSource } = await jiti.import(path.join(repoRoot, "src", "patch-source.ts"), { default: false });
@@ -690,7 +691,7 @@ assert.equal(altFields[0].author, "human");
 	assert.equal(entry.summary, summary);
 
 	// Reviewed adapter: normalises a session-review payload (shape-tolerant).
-	const reviewedSource = createReviewedPatchSource(async () => undefined);
+	const reviewedSource = createReviewedPatchSource();
 	reviewedSource.hydrate({ files: [{ path: "src/app.ts", patch, summary: "reviewed app.ts" }] }, cwd);
 	const reviewedEntry = reviewedSource.findForFile("src/app.ts", cwd);
 	assert.ok(reviewedEntry, "reviewed source resolves the reviewed patch by file");
@@ -730,6 +731,119 @@ assert.equal(altFields[0].author, "human");
 	const bridge = createHunkBridge(createPatchSource(reviewedSource, agentSource));
 	assert.equal(bridge.renderReviewLines.length, 3, "renderReviewLines(result, cwd, theme) — findRecent no longer threaded");
 	assert.equal(bridge.renderNotesLines.length, 5, "renderNotesLines(result, cwd, theme, config, highlighter) — findRecent no longer threaded");
+}
+
+// --- #14–#16: one session-read seam, reviewed-patch pinning, reviewed ref ----
+// A supported Hunk review export is one round trip carrying session + patch +
+// notes. The legacy adapter owns the exact two-call get/list fallback. The
+// bridge hydrates the reviewed source from the same payload before shaping, so
+// a note pins in reviewed coordinates even when the agent patch is elsewhere.
+{
+	const cwd = repoRoot;
+	const filePath = path.join(cwd, "src", "branch.ts");
+	const reviewedPatch = [
+		"--- a/src/branch.ts",
+		"+++ b/src/branch.ts",
+		"@@ -40 +40 @@",
+		"-reviewed old",
+		"+reviewed new",
+	].join("\n");
+	const agentPatch = [
+		"--- a/src/branch.ts",
+		"+++ b/src/branch.ts",
+		"@@ -1 +1 @@",
+		"-agent old",
+		"+agent new",
+	].join("\n");
+	const reviewPayload = {
+		sessionId: "review-session",
+		title: "pi-hunk main...feature-A",
+		sourceLabel: cwd,
+		files: [{ id: "branch", path: "src/branch.ts", patch: reviewedPatch, additions: 1, deletions: 1, hunkCount: 1, hunks: [] }],
+		reviewNotes: [
+			{ noteId: "human-1", source: "user", filePath: "src/branch.ts", newRange: [40, 40], body: "review the branch-specific line", author: "human" },
+			{ noteId: "agent-1", source: "agent", filePath: "src/branch.ts", newRange: [40, 40], body: "must stay hidden" },
+		],
+	};
+	const calls = [];
+	const exec = async (execCwd, args, _config, timeout) => {
+		calls.push({ cwd: execCwd, args: [...args], timeout });
+		return reviewPayload;
+	};
+	const sessionRead = createHunkSessionRead(exec);
+	const fetched = await sessionRead.read(cwd, DEFAULT_CONFIG);
+	assert.equal(fetched.source, "review");
+	assert.equal(fetched.session, reviewPayload);
+	assert.equal(fetched.patch, reviewPayload);
+	assert.equal(fetched.notes, reviewPayload);
+	assert.equal(calls.length, 1, "review export returns session + patch + notes in one round trip");
+	assert.deepEqual(calls[0].args, ["session", "review", "--repo", cwd, "--include-patch", "--include-notes", "--json"]);
+
+	const store = createRenderRecordStore();
+	store.record("agent-call", { tool: "edit", filePath, patch: agentPatch, summary: "agent branch edit" });
+	const reviewedSource = createReviewedPatchSource();
+	const composite = createPatchSource(reviewedSource, createAgentEditPatchSource(store));
+	const bridge = createHunkBridge(composite, { sessionRead, reviewedSource });
+	calls.length = 0;
+	const notes = await bridge.readNotes(cwd, DEFAULT_CONFIG);
+	assert.equal(calls.length, 1, "bridge does not add a probe or comment-list call on the review-export path");
+	assert.equal(notes.comments.length, 1, "review export is filtered to human-authored source=user notes");
+	assert.equal(notes.comments[0].summary, "review the branch-specific line");
+	assert.equal(notes.hunks.length, 1, "reviewed note pins onto the reviewed patch");
+	assert.equal(notes.hunks[0].lines[0].address.newLine, 40, "pinning uses reviewed coordinates, not the agent patch at line 1");
+	assert.equal(notes.hunks[0].patch, reviewedPatch);
+	assert.match(notes.message, /Human reviewing main\.\.\.feature-A\./, "reviewed ref is present in the agent prompt header");
+	assert.doesNotMatch(notes.message, /must stay hidden/, "agent-authored review notes are never surfaced");
+	const rendered = bridge.renderNotesLines(notes, cwd, fakeTheme(), { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: false, showHunkHint: false }, undefined).join("\n");
+	assert.match(rendered, /reviewed new/, "reviewed patch flows through the shared diff renderer");
+	assert.match(rendered, /review the branch-specific line/, "human note renders on its reviewed row");
+
+	assert.equal(reviewedRefFromSession({ reviewedRef: "base...head" }), "base...head", "explicit reviewed-ref field wins");
+	assert.equal(reviewedRefFromSession({ title: "pi-hunk main...feature-A", sourceLabel: cwd }), "main...feature-A", "current Hunk title yields the reviewed range");
+	assert.equal(reviewedRefFromSession({ sessionId: "no-ref" }), undefined, "missing ref is tolerated without fabrication");
+}
+
+{
+	const cwd = repoRoot;
+	const legacyCalls = [];
+	const legacyExec = async (_execCwd, args) => {
+		legacyCalls.push([...args]);
+		if (args[1] === "get") return { sessionId: "legacy-session" };
+		return [{ noteId: "legacy-note", source: "user", filePath: "legacy.ts", newRange: [1, 1], body: "legacy human note" }];
+	};
+	const legacy = createLegacyHunkSessionRead(legacyExec);
+	const legacyResult = await legacy.read(cwd, DEFAULT_CONFIG);
+	assert.equal(legacyResult.source, "legacy");
+	assert.equal(legacyCalls.length, 2, "legacy adapter is exactly the current two-call path");
+	assert.deepEqual(legacyCalls[0], ["session", "get", "--repo", cwd, "--json"]);
+	assert.deepEqual(legacyCalls[1], ["session", "comment", "list", "--repo", cwd, "--type", "user", "--json"]);
+
+	const fallbackCalls = [];
+	const fallbackExec = async (_execCwd, args) => {
+		fallbackCalls.push([...args]);
+		if (args[1] === "review") return undefined;
+		if (args[1] === "get") return { sessionId: "fallback-session" };
+		return [{ noteId: "fallback-note", source: "user", filePath: "legacy.ts", newRange: [1, 1], body: "fallback human note" }];
+	};
+	const fallbackRead = createHunkSessionRead(fallbackExec);
+	const fallbackResult = await fallbackRead.read(cwd, DEFAULT_CONFIG);
+	assert.equal(fallbackResult.source, "legacy", "missing review command falls back to session get + comment list");
+	assert.equal(fallbackCalls.length, 3, "unsupported review is attempted once before the two legacy calls");
+
+	const agentPatch = ["--- a/legacy.ts", "+++ b/legacy.ts", "@@ -1 +1 @@", "-old", "+new"].join("\n");
+	const staleReviewedPatch = ["--- a/legacy.ts", "+++ b/legacy.ts", "@@ -99 +99 @@", "-stale", "+stale reviewed"].join("\n");
+	const store = createRenderRecordStore();
+	store.record("legacy-agent", { tool: "edit", filePath: path.join(cwd, "legacy.ts"), patch: agentPatch, summary: "legacy agent edit" });
+	const reviewedSource = createReviewedPatchSource();
+	reviewedSource.hydrate({ files: [{ path: "legacy.ts", patch: staleReviewedPatch }] }, cwd);
+	const composite = createPatchSource(reviewedSource, createAgentEditPatchSource(store));
+	const bridge = createHunkBridge(composite, { sessionRead: fallbackRead, reviewedSource });
+	fallbackCalls.length = 0;
+	const notes = await bridge.readNotes(cwd, DEFAULT_CONFIG);
+	assert.equal(notes.hunks.length, 1, "legacy path falls back to agent-edit correlation");
+	assert.equal(notes.hunks[0].patch, agentPatch, "legacy read clears any stale reviewed-patch cache");
+	assert.equal(notes.hunks[0].lines[0].address.newLine, 1);
+	assert.doesNotMatch(notes.message, /Human reviewing/, "missing reviewed ref omits the header without error");
 }
 
 // --- #12: review-note shape canonical in ReviewNotesResult --------------------

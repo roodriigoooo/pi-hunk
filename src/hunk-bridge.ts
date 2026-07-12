@@ -1,5 +1,4 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
 import type { HunkConfig } from "./config";
 import {
 	findPatchLineAddress,
@@ -11,15 +10,16 @@ import {
 	type ParsedPatch,
 	type PatchLineAddress,
 } from "./diff-view";
+import { createHunkSessionRead, type HunkSessionRead } from "./hunk-session-read";
 import { displayPath, fileKey } from "./paths";
-import type { PatchEntry, PatchSource, RefreshablePatchSource } from "./patch-source";
+import type { PatchEntry, PatchSource, ReviewedPatchSource } from "./patch-source";
 import { commentLocation, groupCommentsByFile, commentLines, renderReviewView, type ReviewViewStrategy } from "./review-view";
+
+export { runHunkJson } from "./hunk-session-read";
 
 // ============================================================================
 // Types
 // ============================================================================
-
-type HunkExecResult = { stdout: string; stderr: string; code: number };
 
 export type HunkComment = {
 	id?: string;
@@ -60,62 +60,11 @@ export type ReviewNotesResult = {
 	comments: HunkComment[];
 	message: string;
 	session?: any;
+	reviewedRef?: string;
 	error?: string;
 	hunks?: ReviewNoteHunk[];
 	openComments?: HunkComment[];
 };
-
-// ============================================================================
-// Hunk CLI exec
-// ============================================================================
-
-async function hunkExec(cwd: string, command: string, args: string[], timeout = 20_000, signal?: AbortSignal): Promise<HunkExecResult> {
-	return await new Promise<HunkExecResult>((resolve) => {
-		const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-		let stdout = "";
-		let stderr = "";
-		let settled = false;
-		const finish = (result: HunkExecResult) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			signal?.removeEventListener("abort", onAbort);
-			resolve(result);
-		};
-		const timer = setTimeout(() => {
-			child.kill("SIGTERM");
-		}, timeout);
-		const onAbort = () => child.kill("SIGTERM");
-		signal?.addEventListener("abort", onAbort, { once: true });
-		child.stdout.setEncoding("utf8");
-		child.stderr.setEncoding("utf8");
-		child.stdout.on("data", (d) => (stdout += d));
-		child.stderr.on("data", (d) => (stderr += d));
-		child.on("close", (code) => finish({ stdout, stderr, code: code ?? 1 }));
-		child.on("error", (error) => finish({ stdout, stderr: String(error), code: 1 }));
-	});
-}
-
-/** Run a `hunk` CLI subcommand and parse its JSON stdout. Returns undefined on
- *  non-zero exit or unparseable output. Exported so the reviewed-patch source
- *  can fetch `session review --include-patch --include-notes` through the same
- *  defensive exec path as the rest of the bridge. */
-export async function runHunkJson(cwd: string, args: string[], config: HunkConfig, timeout = 20_000, signal?: AbortSignal): Promise<any | undefined> {
-	const execResult = await hunkExec(cwd, config.hunk.binary, args, timeout, signal);
-	if (execResult.code !== 0) return undefined;
-	try {
-		return JSON.parse(execResult.stdout);
-	} catch {
-		return undefined;
-	}
-}
-
-/** Refresh a patch source's cache if it is refreshable; no-op for plain sources
- *  (e.g. the agent-edit adapter used in unit tests). */
-async function refreshPatchSource(source: PatchSource, cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<void> {
-	const refresh = (source as RefreshablePatchSource).refresh;
-	if (typeof refresh === "function") await refresh.call(source, cwd, config, signal);
-}
 
 // ============================================================================
 // Comment normalization — the defensive Hunk JSON schema tolerance
@@ -144,6 +93,41 @@ function stringOrUndefined(value: unknown): string | undefined {
 	return s || undefined;
 }
 
+/** Extract the reviewed ref/range without depending on one Hunk JSON version.
+ * Current Hunk review exports expose the range through their display `title`
+ * (for example `repo main...feature`) rather than a dedicated ref field, so the
+ * final fallback removes the repo-name prefix from that title. */
+export function reviewedRefFromSession(session: any): string | undefined {
+	const direct = [
+		session?.reviewedRef,
+		session?.reviewRef,
+		session?.diffRange,
+		session?.range,
+		session?.ref,
+		session?.targetRef,
+		session?.compare,
+		session?.input?.range,
+		session?.input?.ref,
+		session?.target?.range,
+		session?.target?.ref,
+		session?.target?.label,
+		session?.diff?.range,
+		session?.diff?.ref,
+		session?.context?.reviewedRef,
+		session?.context?.range,
+		session?.session?.reviewedRef,
+		session?.session?.range,
+	].map(stringOrUndefined).find(Boolean);
+	if (direct) return direct;
+
+	const title = stringOrUndefined(session?.title ?? session?.review?.title ?? session?.session?.title);
+	if (!title) return undefined;
+	const sourceLabel = stringOrUndefined(session?.sourceLabel ?? session?.review?.sourceLabel ?? session?.session?.sourceLabel);
+	const repoName = sourceLabel?.split(/[\\/]/).filter(Boolean).pop();
+	if (repoName && title.startsWith(`${repoName} `)) return stringOrUndefined(title.slice(repoName.length + 1));
+	return title;
+}
+
 /** Normalize a Hunk `comment list` payload into semantic comments. */
 export function normalizeHunkComments(payload: any): HunkComment[] {
 	const raw: Array<{ comment: any; fileHint?: string }> = [];
@@ -155,6 +139,10 @@ export function normalizeHunkComments(payload: any): HunkComment[] {
 	pushCollection(payload?.comments);
 	pushCollection(payload?.items);
 	pushCollection(payload?.annotations);
+	pushCollection(payload?.reviewNotes);
+	pushCollection(payload?.notes);
+	pushCollection(payload?.review?.reviewNotes);
+	pushCollection(payload?.session?.reviewNotes);
 
 	if (Array.isArray(payload?.files)) {
 		for (const file of payload.files) {
@@ -178,14 +166,14 @@ export function normalizeHunkComments(payload: any): HunkComment[] {
 		if (!summary) continue;
 		const filePath = stringOrUndefined(c.filePath ?? c.file ?? c.path ?? location?.filePath ?? location?.file ?? location?.path ?? fileHint);
 		const comment: HunkComment = {
-			id: stringOrUndefined(c.id ?? c.commentId ?? c.uuid),
+			id: stringOrUndefined(c.id ?? c.commentId ?? c.noteId ?? c.uuid),
 			filePath,
 			oldLine: firstFiniteNumber(c.oldLine, c.old_line, location?.oldLine, line?.old, oldRange),
 			newLine: firstFiniteNumber(c.newLine, c.new_line, location?.newLine, line?.new, newRange),
 			summary,
 			rationale: stringOrUndefined(c.rationale ?? c.reason ?? c.detail ?? c.details ?? c.description),
 			author: typeof c.author === "object" ? stringOrUndefined(c.author?.name ?? c.author?.id) : stringOrUndefined(c.author),
-			type: stringOrUndefined(c.type ?? c.kind),
+			type: stringOrUndefined(c.type ?? c.kind ?? c.source),
 		};
 		const dedupeKey = JSON.stringify([comment.id, comment.filePath, comment.oldLine, comment.newLine, comment.summary, comment.rationale]);
 		if (seen.has(dedupeKey)) continue;
@@ -212,8 +200,9 @@ function reviewNotesSignature(comments: HunkComment[], cwd: string): string {
 	);
 }
 
-function buildReviewPrompt(comments: HunkComment[], cwd: string, shape?: ReviewNoteShape): string {
+function buildReviewPrompt(comments: HunkComment[], cwd: string, shape?: ReviewNoteShape, reviewedRef?: string): string {
 	const lines: string[] = ["Open Hunk review state (human-authored notes):"];
+	if (reviewedRef) lines.push(`Human reviewing ${reviewedRef.replace(/[.]+$/, "")}.`);
 	let index = 1;
 	if (shape?.hunks.length) {
 		for (const hunk of shape.hunks) {
@@ -437,46 +426,60 @@ export interface ReviewBridge {
 	renderReviewLines(result: ReviewNotesResult | undefined, cwd: string, theme: Theme): string[];
 }
 
+export type HunkBridgeOptions = {
+	/** Owns Hunk command construction and one-call/fallback fetch policy. */
+	sessionRead?: HunkSessionRead;
+	/** Cache hydrated from the exact reviewed patch returned by `sessionRead`. */
+	reviewedSource?: ReviewedPatchSource;
+};
+
 /** Build a review bridge over one `PatchSource`. The source is wired once here;
  *  every correlation and render path asks it for the patch to pin against, so
- *  `findRecent` is no longer threaded through each call site. Refreshable sources
- *  (the reviewed-patch composite) are refreshed while a live session is held. */
-export function createHunkBridge(patchSource: PatchSource): ReviewBridge {
+ *  `findRecent` is no longer threaded through each call site. `HunkSessionRead`
+ *  owns all CLI command/fetch policy; its reviewed payload hydrates the preferred
+ *  patch adapter before notes are shaped. */
+export function createHunkBridge(patchSource: PatchSource, options: HunkBridgeOptions = {}): ReviewBridge {
 	let lastSignature = "";
+	const sessionRead = options.sessionRead ?? createHunkSessionRead();
+	const reviewedSource = options.reviewedSource;
 	const findForFile = (filePath: string | undefined, cwd: string): PatchEntry | undefined => patchSource.findForFile(filePath, cwd);
 
 	return {
 		probeSession(cwd, config, signal) {
 			if (!config.hunk.enabled) return Promise.resolve(undefined);
-			return runHunkJson(cwd, ["session", "get", "--repo", cwd, "--json"], config, 5_000, signal);
+			return sessionRead.probe(cwd, config, signal);
 		},
 
 		async readNotes(cwd, config, signal) {
-			const session = await this.probeSession(cwd, config, signal);
-			if (!session) {
+			const read = config.hunk.enabled ? await sessionRead.read(cwd, config, signal) : undefined;
+			if (!read) {
+				reviewedSource?.clear();
 				return {
 					live: false,
 					comments: [],
 					message: `No live Hunk session is attached to ${cwd}. Open another terminal in this repo and run: hunk diff --watch`,
 				};
 			}
-			// Refresh the reviewed-patch cache while we already hold a live session,
-			// so correlation pins against the patch the human is actually reviewing.
-			// A plain agent-edit source is not refreshable and this is a no-op.
-			await refreshPatchSource(patchSource, cwd, config, signal);
-			const commentsPayload = await runHunkJson(cwd, ["session", "comment", "list", "--repo", cwd, "--type", "user", "--json"], config, 20_000, signal);
-			if (!commentsPayload) {
-				return { live: true, session, comments: [], message: "Live Hunk session found, but no user comments were returned." };
+			if (read.patch) reviewedSource?.hydrate(read.patch, cwd);
+			else reviewedSource?.clear();
+			const reviewedRef = reviewedRefFromSession(read.session);
+			if (read.notes === undefined) {
+				return { live: true, session: read.session, reviewedRef, comments: [], message: "Live Hunk session found, but no user comments were returned." };
 			}
-			const comments = normalizeHunkComments(commentsPayload);
+			const comments = normalizeHunkComments(read.notes);
 			const shape = buildReviewNoteShape(comments, findForFile, cwd);
 			return {
 				live: true,
-				session,
+				session: read.session,
+				reviewedRef,
 				comments,
 				hunks: shape.hunks,
 				openComments: shape.openComments,
-				message: comments.length ? buildReviewPrompt(comments, cwd, shape) : "Live Hunk session found. No user Hunk comments are open.",
+				message: comments.length
+					? buildReviewPrompt(comments, cwd, shape, reviewedRef)
+					: reviewedRef
+						? `Live Hunk session found for ${reviewedRef}. No user Hunk comments are open.`
+						: "Live Hunk session found. No user Hunk comments are open.",
 			};
 		},
 
@@ -487,7 +490,10 @@ export function createHunkBridge(patchSource: PatchSource): ReviewBridge {
 			// untouched files never trigger pickup on their own.
 			const relevant = notesRelevantToRecords(result.comments, findForFile, cwd);
 			const shape = buildReviewNoteShape(relevant, findForFile, cwd);
-			const scoped: ReviewNotesResult = relevant.length === result.comments.length ? result : { ...result, comments: relevant, hunks: shape.hunks, openComments: shape.openComments, message: buildReviewPrompt(relevant, cwd, shape) };
+			const scoped: ReviewNotesResult =
+				relevant.length === result.comments.length
+					? result
+					: { ...result, comments: relevant, hunks: shape.hunks, openComments: shape.openComments, message: buildReviewPrompt(relevant, cwd, shape, result.reviewedRef) };
 			if (relevant.length < 1) return { result: scoped, inject: false };
 			const signature = reviewNotesSignature(scoped.comments, cwd);
 			if (signature === lastSignature) return { result: scoped, inject: false };

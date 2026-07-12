@@ -13,6 +13,18 @@ https://github.com/user-attachments/assets/d204fc5e-8716-4fbe-96a5-debeaa589fa5
 1. **Diff renderer.** Every `write` and `edit` result renders through pi-hunk with Shiki syntax tokenisation, word-level highlights via `diffWordsWithSpace`, compact folding of unchanged regions, line numbers, hunk captions, changed-line gutter bars, and a bordered file header.
 2. **Read-only Hunk bridge.** While the agent works, you run `hunk diff --watch` in a second terminal on the same repo and add comments with `c`. pi-hunk reads only the comments you authored (`type=user`) and attaches them to the agent as review state. pi-hunk never creates, edits, applies, removes, or clears Hunk comments, and it writes no patch or sidecar files.
 
+## Review checkout alignment
+
+Current Hunk releases let pi-hunk read the exact reviewed patch together with its notes, so note pinning remains in the human review's coordinate system even when the agent checkout differs ([#15](https://github.com/roodriigoooo/pi-hunk/issues/15)). The simplest zero-code workflow—and the fallback for older Hunk versions—is still to run the agent and Hunk from the same worktree and branch:
+
+```bash
+git worktree add ../my-repo-feature feature-A
+cd ../my-repo-feature
+hunk diff --watch
+```
+
+Open pi in a second terminal at `../my-repo-feature`. Both processes then see the same branch and working tree, so agent-edit correlation is aligned by construction. Use the reviewed-patch path above when sharing one worktree is not practical.
+
 ## Install
 
 ```bash
@@ -47,8 +59,8 @@ npm run check
 
 Runs two scripts:
 
-- `scripts/units.mjs` tests the exposed seams directly: `parseUnifiedPatch` for structure, line numbers, word-emphasis ranges, side-aware strike highlighting, tint persistence across Shiki token resets, and no phantom trailing line; `normalizeHunkComments` for shape tolerance, dedup, and the `type=user` filter.
-- `scripts/smoke.mjs` loads the extension through pi's Jiti runtime, drives synthetic `write` and `edit` calls, verifies ANSI rendering, verifies no sidecars are written, tests auto review pickup, exercises the `/hunk configure` live-preview UI, and dry-runs the Hunk comment parser against a fake live session.
+- `scripts/units.mjs` tests the exposed seams directly: patch parsing/layout/styling, Hunk comment normalization, one-call and legacy session reads, reviewed-patch pinning across divergent coordinates, reviewed-ref propagation, configuration specs, and review-view scaffolding.
+- `scripts/smoke.mjs` loads the extension through pi's Jiti runtime, drives synthetic `write` and `edit` calls, verifies ANSI rendering and no sidecars, tests auto review pickup, exercises `/hunk configure`, and runs the legacy Hunk fallback against a fake live session with exact `--repo` and `--type user` assertions.
 
 The check scripts locate pi by `PI_CODING_AGENT_ROOT` or a few common install paths (global npm, `node_modules`, `~/.pi/agent/npm`). Set `PI_CODING_AGENT_ROOT` if pi lives somewhere else.
 
@@ -58,7 +70,8 @@ The check scripts locate pi by `PI_CODING_AGENT_ROOT` or a few common install pa
 - `src/paths.ts` path resolution and display helpers.
 - `src/render-records.ts` in-memory store of recent rendered edits.
 - `src/diff-view.ts` the DiffView module: unified-patch parser, word-emphasis model, and renderer.
-- `src/hunk-bridge.ts` the ReviewBridge module: Hunk CLI exec, comment normalization, note shaping, pickup and dedup policy, note-to-edit correlation, and the read-only review pairing.
+- `src/hunk-session-read.ts` the Hunk CLI seam: command construction, one-call review export, and legacy two-call fallback policy.
+- `src/hunk-bridge.ts` the ReviewBridge module: comment normalization, note shaping, pickup and dedup policy, note-to-patch correlation, and the read-only review pairing.
 - `src/configure.ts` the `/hunk configure` TUI.
 - `src/index.ts` extension entry: wires modules and registers tools, commands, and events.
 

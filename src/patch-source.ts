@@ -1,4 +1,3 @@
-import type { HunkConfig } from "./config";
 import { fileKey } from "./paths";
 
 // ============================================================================
@@ -30,32 +29,19 @@ export interface PatchSource {
 	findForFile(filePath: string | undefined, cwd: string): PatchEntry | undefined;
 }
 
-/** A patch source that can refresh its cache from an async origin (a live Hunk
- *  session). The bridge refreshes it while it already holds a live session. */
-export interface RefreshablePatchSource extends PatchSource {
-	refresh(cwd: string, config: HunkConfig, signal?: AbortSignal): Promise<void>;
-}
-
-/** Returns the raw `session review --include-patch --include-notes` payload
- *  (any shape), or undefined when there is no reviewed patch. Injected so the
- *  adapter has no direct dependency on the Hunk CLI — tests pass a static
- *  payload, the live wiring passes a `runHunkJson` fetcher. */
-export type ReviewPayloadFetcher = (cwd: string, config: HunkConfig, signal?: AbortSignal) => Promise<any | undefined>;
-
-export interface ReviewedPatchSource extends RefreshablePatchSource {
-	/** Hydrate the cache from a pre-fetched payload (tests). */
+/** Cache adapter for the reviewed patch already fetched by `HunkSessionRead`.
+ * It deliberately has no CLI/fetch dependency: session round trips and command
+ * construction have one owner, while this module only answers patch queries. */
+export interface ReviewedPatchSource extends PatchSource {
+	/** Hydrate the cache from a pre-fetched session-review payload. */
 	hydrate(payload: any, cwd: string): void;
 	/** Empty the cache (e.g. when the live session drops). */
 	clear(): void;
 }
 
-export function createReviewedPatchSource(fetcher: ReviewPayloadFetcher): ReviewedPatchSource {
+export function createReviewedPatchSource(): ReviewedPatchSource {
 	let cache = new Map<string, PatchEntry>();
 	return {
-		async refresh(cwd, config, signal) {
-			const payload = await fetcher(cwd, config, signal);
-			cache = payload ? normalizeReviewPatches(payload, cwd) : new Map();
-		},
 		hydrate(payload, cwd) {
 			cache = normalizeReviewPatches(payload, cwd);
 		},
@@ -119,17 +105,11 @@ export function normalizeReviewPatches(payload: any, cwd: string): Map<string, P
 }
 
 /** Prefer `primary` (reviewed patch) and fall back to `fallback` (agent-edit
- *  record). Refreshes delegate to `primary` when it is refreshable, so the
- *  bridge refreshes one source and the composite keeps query logic in one place. */
+ * record), keeping the query policy in one place. */
 export function createPatchSource(primary: PatchSource, fallback: PatchSource): PatchSource {
-	const source: PatchSource & Partial<Pick<RefreshablePatchSource, "refresh">> = {
+	return {
 		findForFile(filePath, cwd) {
 			return primary.findForFile(filePath, cwd) ?? fallback.findForFile(filePath, cwd);
 		},
 	};
-	const primaryRefresh = (primary as RefreshablePatchSource).refresh;
-	if (typeof primaryRefresh === "function") {
-		source.refresh = (cwd, config, signal) => primaryRefresh.call(primary, cwd, config, signal);
-	}
-	return source;
 }
