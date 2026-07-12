@@ -1,6 +1,7 @@
 import { type HunkConfig, loadConfig } from "./config";
 import { createHighlighterCache, type HighlighterCache } from "./highlighter-cache";
-import { createHunkBridge, runHunkJson, type ReviewBridge } from "./hunk-bridge";
+import { createHunkBridge, type ReviewBridge } from "./hunk-bridge";
+import { createHunkSessionRead, type HunkSessionRead } from "./hunk-session-read";
 import { createPatchSource, createReviewedPatchSource, type PatchSource, type ReviewedPatchSource } from "./patch-source";
 import { createAgentEditPatchSource, createRenderRecordStore, type RenderRecordStore } from "./render-records";
 
@@ -21,6 +22,7 @@ export interface ExtensionState {
 	setLiveSession(live: boolean): void;
 	readonly highlighters: HighlighterCache;
 	readonly records: RenderRecordStore;
+	readonly sessionRead: HunkSessionRead;
 	readonly patchSource: PatchSource;
 	readonly reviewedSource: ReviewedPatchSource;
 	readonly bridge: ReviewBridge;
@@ -38,11 +40,10 @@ export async function createExtensionState(): Promise<ExtensionState> {
 	const highlighters = createHighlighterCache();
 	const records = createRenderRecordStore();
 	const agentEditSource = createAgentEditPatchSource(records);
-	const reviewedSource = createReviewedPatchSource((cwd, cfg, signal) =>
-		runHunkJson(cwd, ["session", "review", "--repo", cwd, "--include-patch", "--include-notes", "--json"], cfg, 20_000, signal),
-	);
+	const sessionRead = createHunkSessionRead();
+	const reviewedSource = createReviewedPatchSource();
 	const patchSource = createPatchSource(reviewedSource, agentEditSource);
-	const bridge = createHunkBridge(patchSource);
+	const bridge = createHunkBridge(patchSource, { sessionRead, reviewedSource });
 
 	await highlighters.refresh(config);
 
@@ -57,6 +58,7 @@ export async function createExtensionState(): Promise<ExtensionState> {
 		},
 		highlighters,
 		records,
+		sessionRead,
 		patchSource,
 		reviewedSource,
 		bridge,
