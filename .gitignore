@@ -4,11 +4,11 @@ node_modules/
 .pi/hunk/
 .pi/huff.json
 .pi/huff/
+.pi/scrutiny/
 PLAN.md
 
 # Local synthetic test repos + demo runner (issue #11 visual demo)
 .synthetic/
 
-# Local demo recording scripts/artifacts
-/docs/demo-script.*
+# Local demo recording artifacts
 /docs/demo-assets/
