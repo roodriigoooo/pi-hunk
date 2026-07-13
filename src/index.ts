@@ -10,230 +10,221 @@ import {
 	type ToolRenderContext,
 	type WriteToolInput,
 } from "@earendil-works/pi-coding-agent";
-import { Text, truncateToWidth, wrapTextWithAnsi, type AutocompleteItem } from "@earendil-works/pi-tui";
+import { Text, type AutocompleteItem } from "@earendil-works/pi-tui";
 import fs from "node:fs/promises";
-import { Type } from "typebox";
-import { mergeConfig } from "./config";
+import type { ReviewCheckpoint } from "./checkpoint-store";
 import { openHunkConfig } from "./configure";
 import { createDiffView, DiffComponent, writePatch } from "./diff-view";
 import { createExtensionState, type ExtensionState } from "./extension-state";
-import { type ReviewNotesResult, stringOr } from "./hunk-bridge";
 import { displayPath, resolveUserPath } from "./paths";
 import { type RenderRecord } from "./render-records";
 
-// ============================================================================
-// /hunk command dispatch (status · send · on|off · review · configure)
-// ============================================================================
-
 const HUNK_SUBCOMMANDS: AutocompleteItem[] = [
-	{ value: "status", label: "status", description: "Show pi-hunk and live Hunk session status." },
-	{ value: "send", label: "send", description: "Attach open human review notes to the agent." },
-	{ value: "on", label: "on", description: "Enable auto review pickup before agent turns." },
-	{ value: "off", label: "off", description: "Disable auto review pickup." },
-	{ value: "review", label: "review", description: "Open read-only review pairing notes with recent edits." },
-	{ value: "configure", label: "configure", description: "Open the configuration TUI." },
+	{ value: "status", label: "status", description: "Show checkpoint and Hunk session status." },
+	{ value: "review", label: "review", description: "Open Hunk review or attach its existing side pane." },
+	{ value: "submit", label: "submit", description: "Submit checkpointed human review notes." },
+	{ value: "abandon", label: "abandon", description: "Abandon active review checkpoint." },
+	{ value: "configure", label: "configure", description: "Open configuration TUI." },
 ];
 
 function hunkArgumentCompletions(prefix: string): AutocompleteItem[] {
 	const trimmed = prefix.trim();
-	if (!trimmed) return HUNK_SUBCOMMANDS;
-	const [first, ...rest] = trimmed.split(/\s+/);
-	if (first === "auto") {
-		const sub = rest.join("").trim();
-		const opts: AutocompleteItem[] = [
-			{ value: "auto on", label: "on", description: "Enable auto review pickup before agent turns." },
-			{ value: "auto off", label: "off", description: "Disable auto review pickup." },
-		];
-		return sub ? opts.filter((o) => o.label.startsWith(sub)) : opts;
+	return trimmed ? HUNK_SUBCOMMANDS.filter((item) => item.value.startsWith(trimmed)) : HUNK_SUBCOMMANDS;
+}
+
+function checkpointLabel(checkpoint: ReviewCheckpoint | undefined): string {
+	if (!checkpoint) return "no checkpoint";
+	return `${checkpoint.state} · ${checkpoint.id.slice(0, 8)} r${checkpoint.revision} · ${checkpoint.snapshot.notes.length} user note${checkpoint.snapshot.notes.length === 1 ? "" : "s"}`;
+}
+
+function hunkFailureMessage(message: string): string {
+	return `${message} Run /hunk review after fixing Hunk session state.`;
+}
+
+function submissionContent(checkpoint: ReviewCheckpoint): string {
+	const snapshot = checkpoint.snapshot;
+	const lines = [
+		"Hunk human review submission:",
+		`Checkpoint: ${checkpoint.id} revision ${checkpoint.revision}`,
+		`Patch digest: ${snapshot.patchDigest}`,
+		`Revision captured: ${checkpoint.revisionCapturedAt}`,
+	];
+	if (checkpoint.submittedAt) lines.push(`Submitted: ${checkpoint.submittedAt}`);
+	if (snapshot.reviewedRef) lines.push(`Reviewed ref: ${snapshot.reviewedRef}`);
+	for (const [index, note] of snapshot.notes.entries()) {
+		lines.push("", `Note ${index + 1}:`, `File: ${note.file}`);
+		if (note.id !== undefined) lines.push(`Note ID: ${note.id}`);
+		if (note.title !== undefined) lines.push(`Title: ${note.title}`);
+		if (note.hunk !== undefined) lines.push(`Hunk: ${JSON.stringify(note.hunk)}`);
+		if (note.oldRange !== undefined) lines.push(`Old range: ${JSON.stringify(note.oldRange)}`);
+		if (note.newRange !== undefined) lines.push(`New range: ${JSON.stringify(note.newRange)}`);
+		if (note.author !== undefined) lines.push(`Author: ${JSON.stringify(note.author)}`);
+		lines.push("Body:", note.body);
 	}
-	return HUNK_SUBCOMMANDS.filter((c) => c.value.startsWith(first));
+	return lines.join("\n");
+}
+
+function sameReviewedPatch(checkpoint: ReviewCheckpoint, snapshot: { reviewIdentity: string }): boolean {
+	return checkpoint.snapshot.reviewIdentity === snapshot.reviewIdentity;
+}
+
+async function handleSubmit(ctx: ExtensionCommandContext, pi: ExtensionAPI, state: ExtensionState) {
+	if (!ctx.isIdle()) {
+		ctx.ui.notify("/hunk submit requires idle Pi. Wait for agent response to finish.", "warning");
+		return;
+	}
+	await state.serial(async () => {
+		const current = state.currentCheckpoint();
+		if (!current || current.state !== "reviewing") {
+			ctx.ui.notify("/hunk submit requires one reviewing checkpoint. Run /hunk review first.", "warning");
+			return;
+		}
+		const live = await state.coordinator.finalExport();
+		if (!live.ok) {
+			ctx.ui.notify(hunkFailureMessage(live.error.message), "warning");
+			return;
+		}
+		if (!sameReviewedPatch(current, live.value)) {
+			const due = state.invalidateForAgentEdit();
+			ctx.ui.notify(due.ok ? "Reviewed patch changed. Checkpoint is re-review due; run /hunk review again." : due.error.message, "warning");
+			return;
+		}
+		const captured = state.capture(live.value);
+		if (!captured.ok) {
+			ctx.ui.notify(captured.error.message, "warning");
+			return;
+		}
+		const submitted = state.submit();
+		if (!submitted.ok) {
+			ctx.ui.notify(submitted.error.message, "warning");
+			return;
+		}
+		state.coordinator.cancel();
+		if (!submitted.checkpoint.snapshot.notes.length) {
+			ctx.ui.notify(`Review ${submitted.checkpoint.id.slice(0, 8)} r${submitted.checkpoint.revision} approved. No model turn started.`, "info");
+			return;
+		}
+		pi.sendMessage(
+			{
+				customType: "hunk-review-submission",
+				content: submissionContent(submitted.checkpoint),
+				display: true,
+				details: {
+					checkpointId: submitted.checkpoint.id,
+					revision: submitted.checkpoint.revision,
+					revisionCapturedAt: submitted.checkpoint.revisionCapturedAt,
+					submittedAt: submitted.checkpoint.submittedAt,
+					reviewedRef: submitted.checkpoint.snapshot.reviewedRef,
+					patchDigest: submitted.checkpoint.snapshot.patchDigest,
+					notes: submitted.checkpoint.snapshot.notes,
+				},
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+		ctx.ui.notify(`Submitted ${submitted.checkpoint.snapshot.notes.length} Hunk note(s) as one follow-up turn.`, "info");
+	});
 }
 
 async function handleHunkCommand(args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI, state: ExtensionState) {
 	const config = state.getConfig();
-	const [sub = "status", arg = ""] = args.trim().split(/\s+/).filter(Boolean);
-	const wantsAutoOn = sub === "on" || (sub === "auto" && arg === "on");
-	const wantsAutoOff = sub === "off" || (sub === "auto" && arg === "off");
-	if (!config.hunk.enabled && sub !== "status" && sub !== "help") {
+	const sub = args.trim().split(/\s+/).filter(Boolean)[0] ?? "status";
+	if (!config.hunk.enabled && sub !== "status") {
 		ctx.ui.notify("Hunk integration is disabled in config.", "warning");
 		return;
 	}
-	if (sub === "status" || sub === "help") {
-		const session = await state.bridge.probeSession(ctx.cwd, config, ctx.signal);
-		const live = !!session;
-		state.setLiveSession(live);
-		const auto = config.hunk.autoReviewNotes ? "on" : "off";
-		if (live) {
-			const id = stringOr(session?.id ?? session?.sessionId ?? session?.session?.id);
-			ctx.ui.notify(`pi-hunk is active. Recent diffs: ${state.records.recentCount()}. Auto review pickup: ${auto}. Live Hunk session${id ? `: ${id}` : " detected"}. Commands: /hunk status, /hunk send, /hunk on|off, /hunk review, /hunk configure.`, "info");
-		} else {
-			ctx.ui.notify(`pi-hunk is active. Recent diffs: ${state.records.recentCount()}. Auto review pickup: ${auto}. No live Hunk session. Open another terminal in this repo and run: hunk diff --watch`, "info");
-		}
-		return;
-	}
-	if (wantsAutoOn) {
-		state.setConfig(mergeConfig(config, { hunk: { autoReviewNotes: true, autoReviewNotesMin: 1 } }));
-		state.bridge.resetSignature();
-		ctx.ui.notify("Hunk auto review pickup enabled. New relevant notes attach before the next agent turn; no turn starts by itself.", "info");
-		return;
-	}
-	if (wantsAutoOff) {
-		state.setConfig(mergeConfig(config, { hunk: { autoReviewNotes: false } }));
-		state.bridge.resetSignature();
-		ctx.ui.notify("Hunk auto review pickup disabled.", "info");
-		return;
-	}
-	if (sub === "auto") {
-		ctx.ui.notify(`Auto review pickup is ${config.hunk.autoReviewNotes ? "on" : "off"}. Use /hunk on or /hunk off.`, "info");
-		return;
-	}
-	if (sub === "send") {
-		const notes = await state.bridge.readNotes(ctx.cwd, config, ctx.signal);
-		state.setLiveSession(notes.live);
-		if (!notes.live) {
-			ctx.ui.notify(notes.message, "warning");
-			return;
-		}
-		if (!notes.comments.length) {
-			ctx.ui.notify("No open Hunk review notes to attach.", "info");
-			return;
-		}
-		pi.sendUserMessage(notes.message, { deliverAs: ctx.isIdle() ? "followUp" : "steer" });
-		ctx.ui.notify(`Attached ${notes.comments.length} Hunk review note(s) to the agent as ${ctx.isIdle() ? "a follow-up" : "steering"}.`, "info");
+	if (sub === "status") {
+		const probe = await state.sessionClient.probe(ctx.cwd, config, ctx.signal);
+		state.setLiveSession(probe.ok);
+		const diagnostics = state.checkpointDiagnostics();
+		const session = probe.ok ? `Hunk session ${probe.value.sessionId}` : probe.error.message;
+		const ignored = diagnostics.ignoredEntries ? ` · ${diagnostics.ignoredEntries} malformed checkpoint entry ignored` : "";
+		ctx.ui.notify(`pi-hunk active. ${checkpointLabel(state.currentCheckpoint())}. ${session}.${ignored} Commands: /hunk status, /hunk review, /hunk submit, /hunk abandon, /hunk configure.`, probe.ok ? "info" : "warning");
 		return;
 	}
 	if (sub === "review") {
-		let notes = await state.bridge.readNotes(ctx.cwd, config, ctx.signal);
-		state.setLiveSession(notes.live);
-		if (ctx.mode !== "tui") {
-			ctx.ui.notify(notes.live ? `${notes.comments.length} user note(s).` : notes.message, notes.live ? "info" : "warning");
+		if (!ctx.isIdle()) {
+			ctx.ui.notify("/hunk review requires idle Pi. Wait for agent response to finish.", "warning");
 			return;
 		}
-		let theme = ctx.ui.theme;
-		await ctx.ui.custom<void>((tui, nextTheme, _kb, done) => {
-			theme = nextTheme;
-			const refresh = () => {
-				state.bridge
-					.readNotes(ctx.cwd, config, ctx.signal)
-					.then((next) => {
-						notes = next;
-						state.setLiveSession(notes.live);
-						tui.requestRender();
-					})
-					.catch(() => {});
-			};
-			return {
-				render(width: number): string[] {
-					const w = Math.max(20, width);
-					const lines = state.bridge.renderReviewLines(notes, ctx.cwd, theme);
-					return lines.flatMap((line) => wrapTextWithAnsi(line, w)).map((line) => truncateToWidth(line, w));
-				},
-				invalidate() {},
-				handleInput(data: string) {
-					if (data === "\x1b" || data === "\r" || data === "q") {
-						done();
-						return;
-					}
-					if (data === "r" || data === "R") {
-						refresh();
-						return;
-					}
-					tui.requestRender();
-				},
-			};
+		await state.serial(async () => {
+			const recent = state.records.mostRecent();
+			const handoff = await state.coordinator.review(ctx, config, recent ? { file: displayPath(recent.filePath, ctx.cwd), hunk: 1 } : undefined);
+			state.setLiveSession(handoff.mode === "reuse" && !!handoff.sessionId);
+			if (handoff.exportError && !handoff.lastValidExport) {
+				ctx.ui.notify(handoff.exportError.message, "warning");
+				return;
+			}
+			if (handoff.launchError || handoff.signal || (handoff.exitCode !== undefined && handoff.exitCode !== null && handoff.exitCode !== 0)) {
+				const ending = handoff.launchError ?? (handoff.signal ? `Hunk ended by ${handoff.signal}.` : `Hunk exited with code ${handoff.exitCode}.`);
+				ctx.ui.notify(handoff.lastValidExport ? `${ending} The last complete checkpoint was retained; use /hunk submit or /hunk abandon.` : ending, "warning");
+				return;
+			}
+			if (handoff.exportError && handoff.lastValidExport) {
+				ctx.ui.notify(`Hunk closed with a recoverable export warning: ${handoff.exportError.message} The last complete checkpoint was retained.`, "warning");
+				return;
+			}
+			ctx.ui.notify(handoff.mode === "reuse" ? `Attached Hunk session ${handoff.sessionId}. Sampling stays local until /hunk submit.` : handoff.lastValidExport ? "Hunk closed. Final checkpoint captured; use /hunk submit or /hunk abandon." : "Hunk closed without a complete review export.", "info");
 		});
 		return;
 	}
-	ctx.ui.notify(`Unknown /hunk command: ${sub}. Try /hunk status, /hunk send, /hunk on|off, /hunk review, or /hunk configure.`, "warning");
+	if (sub === "submit") return handleSubmit(ctx, pi, state);
+	if (sub === "abandon") {
+		await state.serial(async () => {
+			const abandoned = state.abandon();
+			if (!abandoned.ok) {
+				ctx.ui.notify(abandoned.error.message, "warning");
+				return;
+			}
+			state.coordinator.cancel();
+			ctx.ui.notify(`Abandoned checkpoint ${abandoned.checkpoint.id.slice(0, 8)} r${abandoned.checkpoint.revision}. No model turn started.`, "info");
+		});
+		return;
+	}
+	ctx.ui.notify("Unknown /hunk command. Use status, review, submit, abandon, or configure.", "warning");
 }
 
-// ============================================================================
-// Extension entry
-// ============================================================================
-
 export default async function (pi: ExtensionAPI) {
-	const state = await createExtensionState();
-
+	const state = await createExtensionState(pi);
 	const editBase = createEditToolDefinition(process.cwd());
 	const writeBase = createWriteToolDefinition(process.cwd());
 
 	pi.on("session_start", async (_event, ctx) => {
 		await state.reloadConfig(ctx.cwd);
+		state.rehydrate(ctx.sessionManager.getBranch());
 		ctx.ui.setStatus("hunk", state.getConfig().enabled ? "hunk ✦" : undefined);
-		state.bridge
-			.probeSession(ctx.cwd, state.getConfig(), ctx.signal)
-			.then((session) => state.setLiveSession(!!session))
+		state.sessionClient
+			.probe(ctx.cwd, state.getConfig(), ctx.signal)
+			.then((probe) => state.setLiveSession(probe.ok))
 			.catch(() => state.setLiveSession(false));
 	});
-
-	pi.on("before_agent_start", async (_event, ctx) => {
-		const config = state.getConfig();
-		if (!config.hunk.enabled || !config.hunk.reviewTool || !config.hunk.autoReviewNotes) return;
-		const { result, inject } = await state.bridge.pickup(ctx.cwd, config, ctx.signal);
-		state.setLiveSession(result.live);
-		if (!inject) return;
-		ctx.ui.notify(`Picked up ${result.comments.length} Hunk review note(s).`, "info");
-		return {
-			message: {
-				customType: "hunk-review-notes",
-				content: result.message,
-				display: false,
-				details: { comments: result.comments.length },
-			},
-		};
+	pi.on("session_tree", (_event, ctx) => {
+		state.coordinator.cancel();
+		state.rehydrate(ctx.sessionManager.getBranch());
 	});
+	pi.on("session_shutdown", () => state.coordinator.shutdown());
 
 	pi.registerCommand("hunk", {
-		description: "pi-hunk diff renderer and read-only Hunk review bridge (/hunk status, /hunk send, /hunk on|off, /hunk review, /hunk configure)",
-		getArgumentCompletions: (argumentPrefix: string) => hunkArgumentCompletions(argumentPrefix),
+		description: "pi-hunk diff renderer and explicit Hunk review checkpoints (/hunk status, /hunk review, /hunk submit, /hunk abandon, /hunk configure)",
+		getArgumentCompletions: hunkArgumentCompletions,
 		handler: async (args, ctx) => {
-			const [sub] = args.trim().split(/\s+/).filter(Boolean);
+			const sub = args.trim().split(/\s+/).filter(Boolean)[0];
 			if (sub === "configure") {
 				if (!ctx.isIdle()) {
-					ctx.ui.notify("/hunk configure cannot open while the agent is responding. Wait for the response to finish, then run it again.", "warning");
+					ctx.ui.notify("/hunk configure cannot open while agent responds.", "warning");
 					return;
 				}
 				await openHunkConfig(
 					ctx,
 					() => state.getConfig(),
-					async (nextConfig) => {
-						state.setConfig(nextConfig);
-						await state.highlighters.refresh(nextConfig);
+					async (next) => {
+						state.setConfig(next);
+						await state.highlighters.refresh(next);
 					},
-					(nextConfig, invalidate) => state.highlighters.get(nextConfig, invalidate),
+					(next, invalidate) => state.highlighters.get(next, invalidate),
 				);
 				return;
 			}
 			await handleHunkCommand(args, ctx, pi, state);
-		},
-	});
-
-	pi.registerTool({
-		name: "hunk_review_notes",
-		label: "Hunk Review Notes",
-		description: "Read human-authored Hunk review comments for the current repo. This is read-only and only returns comments with type=user from a live Hunk session.",
-		promptSnippet: "Read human-authored Hunk review notes for the current repo (read-only).",
-		promptGuidelines: [
-			"Use hunk_review_notes only to read human-authored Hunk review notes; never use it to create, apply, edit, remove, or clear comments.",
-			"When hunk_review_notes returns notes, address them comment-by-comment and preserve the user's intent.",
-		],
-		parameters: Type.Object({}),
-		renderShell: "self",
-		async execute(_toolCallId, _params, signal, _onUpdate, ctx: ExtensionContext) {
-			const config = state.getConfig();
-			if (!config.hunk.enabled || !config.hunk.reviewTool) {
-				return { content: [{ type: "text", text: "pi-hunk's read-only Hunk review tool is disabled in config." }], details: { live: false, comments: [], message: "disabled" } satisfies ReviewNotesResult };
-			}
-			const notes = await state.bridge.readNotes(ctx.cwd, config, signal);
-			state.setLiveSession(notes.live);
-			return { content: [{ type: "text", text: notes.message }], details: notes };
-		},
-		renderCall(_args, theme: Theme) {
-			return new Text(`${theme.fg("accent", "✦")} ${theme.fg("toolTitle", theme.bold("hunk_review_notes"))} ${theme.fg("dim", "· read-only")}`, 0, 0);
-		},
-		renderResult(result, _options, theme: Theme, context: ToolRenderContext<any, Record<string, never>>) {
-			const config = state.getConfig();
-			return new DiffComponent(() => state.bridge.renderNotesLines(result.details as ReviewNotesResult | undefined, context.cwd, theme, config, state.highlighters.get(config, context.invalidate)));
 		},
 	});
 
@@ -247,13 +238,13 @@ export default async function (pi: ExtensionAPI) {
 			const details = result.details as EditToolDetails | undefined;
 			if (details?.patch) {
 				const filePath = resolveUserPath(params.path, ctx.cwd);
-				const record: RenderRecord = {
+				state.records.record(toolCallId, {
 					tool: "edit",
 					filePath,
 					patch: details.patch,
 					summary: `Edited ${displayPath(filePath, ctx.cwd)} (${params.edits.length} replacement${params.edits.length === 1 ? "" : "s"})`,
-				};
-				state.records.record(toolCallId, record);
+				} satisfies RenderRecord);
+				state.invalidateForAgentEdit();
 			}
 			return result;
 		},
@@ -267,8 +258,17 @@ export default async function (pi: ExtensionAPI) {
 			const patch = record?.patch ?? details?.patch;
 			const filePath = record?.filePath ?? resolveUserPath(context.args.path, context.cwd);
 			if (!config.enabled || !patch) return new Text(details?.diff ?? "Edited file", 0, 0);
-			const activeHighlighter = state.highlighters.get(config, context.invalidate);
-			return createDiffView({ patch, filePath, cwd: context.cwd, title: "edited", config, highlighter: activeHighlighter, theme, liveSession: state.getLiveSession(), invalidate: context.invalidate });
+			return createDiffView({
+				patch,
+				filePath,
+				cwd: context.cwd,
+				title: "edited",
+				config,
+				highlighter: state.highlighters.get(config, context.invalidate),
+				theme,
+				liveSession: state.getLiveSession(),
+				invalidate: context.invalidate,
+			});
 		},
 	});
 
@@ -301,31 +301,29 @@ export default async function (pi: ExtensionAPI) {
 			const result = await tool.execute(toolCallId, params, signal, onUpdate, ctx);
 			const rel = displayPath(filePath, ctx.cwd);
 			const patch = writePatch(existed ? `a/${rel}` : "/dev/null", `b/${rel}`, before, params.content);
-			const record: RenderRecord = {
+			state.records.record(toolCallId, {
 				tool: "write",
 				filePath,
 				patch,
 				summary: `${existed ? "Rewrote" : "Created"} ${rel}`,
-			};
-			state.records.record(toolCallId, record);
+			} satisfies RenderRecord);
+			state.invalidateForAgentEdit();
 			return result;
 		},
 		renderCall(args: WriteToolInput, theme: Theme) {
-			const lines = args.content?.split("\n").length ?? 0;
-			return new Text(`${theme.fg("accent", "✦")} ${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("muted", args.path)} ${theme.fg("dim", `· ${lines} line(s)`)}`, 0, 0);
+			return new Text(`${theme.fg("accent", "✦")} ${theme.fg("toolTitle", theme.bold("write"))} ${theme.fg("muted", args.path)} ${theme.fg("dim", `· ${args.content?.split("\n").length ?? 0} line(s)`)}`, 0, 0);
 		},
 		renderResult(_result, _options, theme: Theme, context: ToolRenderContext<any, WriteToolInput>) {
 			const config = state.getConfig();
 			const record = state.records.get(context.toolCallId);
 			if (!config.enabled || !record?.patch) return new Text("Wrote file", 0, 0);
-			const activeHighlighter = state.highlighters.get(config, context.invalidate);
 			return createDiffView({
 				patch: record.patch,
 				filePath: record.filePath,
 				cwd: context.cwd,
 				title: record.summary.startsWith("Created") ? "created" : "wrote",
 				config,
-				highlighter: activeHighlighter,
+				highlighter: state.highlighters.get(config, context.invalidate),
 				theme,
 				liveSession: state.getLiveSession(),
 				invalidate: context.invalidate,

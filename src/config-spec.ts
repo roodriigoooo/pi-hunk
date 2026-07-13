@@ -369,14 +369,12 @@ export function hunkConfigGroups(): ConfigGroup[] {
 		},
 		{
 			id: "bridge",
-			label: "Renderer & Hunk bridge",
-			description: "Master toggle, hunk hint, and read-only Hunk integration.",
+			label: "Renderer & Hunk review",
+			description: "Master toggle, review hint, and explicit Hunk handoff.",
 			specs: [
 				boolSpec("enabled", "renderer", (c) => c.enabled, (c, v) => (c.enabled = v), "Turn pi-hunk diff rendering on/off."),
-				boolSpec("showHunkHint", "hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /hunk review hint when a live Hunk session exists."),
-				boolSpec("hunk.enabled", "hunk bridge", (c) => c.hunk.enabled, (c, v) => (c.hunk.enabled = v), "Enable read-only Hunk session integration."),
-				boolSpec("hunk.reviewTool", "review tool", (c) => c.hunk.reviewTool, (c, v) => (c.hunk.reviewTool = v), "Expose hunk_review_notes to the model."),
-				boolSpec("hunk.autoReviewNotes", "auto pickup", (c) => c.hunk.autoReviewNotes, (c, v) => (c.hunk.autoReviewNotes = v), "Attach new relevant human notes before agent turns."),
+				boolSpec("showHunkHint", "hunk hint", (c) => c.showHunkHint, (c, v) => (c.showHunkHint = v), "Show /hunk review and /hunk submit hint while Hunk is attached."),
+				boolSpec("hunk.enabled", "hunk review", (c) => c.hunk.enabled, (c, v) => (c.hunk.enabled = v), "Enable explicit Hunk review handoff."),
 			],
 		},
 	];

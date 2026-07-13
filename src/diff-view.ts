@@ -367,8 +367,7 @@ function hunkCaption(hunk: ParsedHunk, filePath: string, cwd: string, theme: The
 
 function hunkFooter(config: HunkConfig, theme: Theme, hasLiveSession: boolean): string[] {
 	if (!config.showHunkHint || !config.hunk.enabled || !hasLiveSession) return [];
-	const toolHint = config.hunk.reviewTool ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", "hunk_review_notes")}` : "";
-	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/hunk review")} opens review state ${theme.fg("dim", "·")} ${theme.fg("muted", "/hunk send")} attaches it${toolHint}`];
+	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/hunk review")} opens or attaches Hunk ${theme.fg("dim", "·")} ${theme.fg("muted", "/hunk submit")} delivers checkpointed notes`];
 }
 
 function annotationText(annotation: DiffLineAnnotation): string {
