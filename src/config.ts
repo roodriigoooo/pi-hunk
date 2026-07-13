@@ -58,10 +58,6 @@ export type HunkConfig = {
 	hunk: {
 		enabled: boolean;
 		binary: string;
-		reviewTool: boolean;
-		autoReviewNotes: boolean;
-		/** Legacy count gate retained for config compatibility; pickup now uses any relevant note. */
-		autoReviewNotesMin: number;
 	};
 };
 
@@ -128,9 +124,6 @@ export const DEFAULT_CONFIG: HunkConfig = {
 	hunk: {
 		enabled: true,
 		binary: "hunk",
-		reviewTool: true,
-		autoReviewNotes: false,
-		autoReviewNotesMin: 1,
 	},
 };
 
@@ -193,10 +186,21 @@ export function mergeConfig(base: HunkConfig, next?: Partial<HunkConfig>): HunkC
 	return normalizeConfig(merged);
 }
 
+function discardLegacyHunkKeys(value: unknown): Partial<HunkConfig> | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const config = value as Record<string, unknown>;
+	const hunkValue = config.hunk;
+	if (!hunkValue || typeof hunkValue !== "object" || Array.isArray(hunkValue)) return config as Partial<HunkConfig>;
+	const hunk = hunkValue as Record<string, unknown>;
+	// These keys previously enabled implicit delivery. Never resurrect them from JSON.
+	const { reviewTool: _reviewTool, autoReviewNotes: _autoReviewNotes, autoReviewNotesMin: _autoReviewNotesMin, ...kept } = hunk;
+	return { ...config, hunk: kept } as Partial<HunkConfig>;
+}
+
 async function loadJsonFile(filePath: string): Promise<Partial<HunkConfig> | undefined> {
 	try {
 		if (!existsSync(filePath)) return undefined;
-		return JSON.parse(await fs.readFile(filePath, "utf8")) as Partial<HunkConfig>;
+		return discardLegacyHunkKeys(JSON.parse(await fs.readFile(filePath, "utf8")));
 	} catch {
 		return undefined;
 	}

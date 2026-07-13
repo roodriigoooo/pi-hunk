@@ -1,50 +1,44 @@
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createCheckpointStore, type CheckpointDiagnostics, type CheckpointResult, type CheckpointStore, type ReviewCheckpoint } from "./checkpoint-store";
 import { type HunkConfig, loadConfig } from "./config";
 import { createHighlighterCache, type HighlighterCache } from "./highlighter-cache";
-import { createHunkBridge, type ReviewBridge } from "./hunk-bridge";
-import { createHunkSessionRead, type HunkSessionRead } from "./hunk-session-read";
-import { createPatchSource, createReviewedPatchSource, type PatchSource, type ReviewedPatchSource } from "./patch-source";
-import { createAgentEditPatchSource, createRenderRecordStore, type RenderRecordStore } from "./render-records";
-
-// ============================================================================
-// ExtensionState — one handle for the extension's mutable closure state
-// ============================================================================
-//
-// `session_start`, `before_agent_start`, the `/hunk` command, the edit/write
-// renders, and the review tool all depend on this one seam instead of scattered
-// closure captures and long handler parameter lists. Config + live-session are
-// getters/setters so every handler reads the latest value; the highlighter
-// cache, record store, and bridge are wired once here and never re-threaded.
+import { createHunkSessionClient, type HunkSessionClient } from "./hunk-session-client";
+import { createRenderRecordStore, type RenderRecordStore } from "./render-records";
+import { createReviewCoordinator, type ReviewCoordinator } from "./review-coordinator";
+import type { ReviewSnapshot } from "./review-export";
 
 export interface ExtensionState {
 	getConfig(): HunkConfig;
 	setConfig(next: HunkConfig): void;
 	getLiveSession(): boolean;
 	setLiveSession(live: boolean): void;
+	currentCheckpoint(): ReviewCheckpoint | undefined;
+	checkpointDiagnostics(): CheckpointDiagnostics;
+	capture(snapshot: ReviewSnapshot): CheckpointResult;
+	submit(): CheckpointResult;
+	invalidateForAgentEdit(): CheckpointResult;
+	abandon(): CheckpointResult;
+	rehydrate(entries: readonly unknown[]): void;
+	serial<T>(operation: () => Promise<T>): Promise<T>;
 	readonly highlighters: HighlighterCache;
 	readonly records: RenderRecordStore;
-	readonly sessionRead: HunkSessionRead;
-	readonly patchSource: PatchSource;
-	readonly reviewedSource: ReviewedPatchSource;
-	readonly bridge: ReviewBridge;
-	/** Reload config for a session cwd and refresh the highlighter cache. */
+	readonly sessionClient: HunkSessionClient;
+	readonly coordinator: ReviewCoordinator;
 	reloadConfig(cwd: string): Promise<HunkConfig>;
 }
 
-/** Build the extension state: load config, create the highlighter cache, the
- *  record store, the patch-source composite (reviewed patch preferred, agent-edit
- *  fallback), and the bridge over that one source. */
-export async function createExtensionState(): Promise<ExtensionState> {
+export async function createExtensionState(pi: ExtensionAPI): Promise<ExtensionState> {
 	let config = await loadConfig(process.cwd());
 	let liveSession = false;
-
+	let queue = Promise.resolve();
 	const highlighters = createHighlighterCache();
 	const records = createRenderRecordStore();
-	const agentEditSource = createAgentEditPatchSource(records);
-	const sessionRead = createHunkSessionRead();
-	const reviewedSource = createReviewedPatchSource();
-	const patchSource = createPatchSource(reviewedSource, agentEditSource);
-	const bridge = createHunkBridge(patchSource, { sessionRead, reviewedSource });
-
+	const checkpoints: CheckpointStore = createCheckpointStore((event) => pi.appendEntry("hunk-checkpoint", event));
+	const sessionClient = createHunkSessionClient();
+	const coordinator = createReviewCoordinator({
+		client: sessionClient,
+		capture: (snapshot) => checkpoints.capture(snapshot),
+	});
 	await highlighters.refresh(config);
 
 	return {
@@ -56,12 +50,22 @@ export async function createExtensionState(): Promise<ExtensionState> {
 		setLiveSession: (live) => {
 			liveSession = live;
 		},
+		currentCheckpoint: () => checkpoints.current(),
+		checkpointDiagnostics: () => checkpoints.diagnostics(),
+		capture: (snapshot) => checkpoints.capture(snapshot),
+		submit: () => checkpoints.submit(),
+		invalidateForAgentEdit: () => checkpoints.invalidateForAgentEdit(),
+		abandon: () => checkpoints.abandon(),
+		rehydrate: (entries) => checkpoints.rehydrate(entries),
+		serial(operation) {
+			const next = queue.then(operation, operation);
+			queue = next.then(() => undefined, () => undefined);
+			return next;
+		},
 		highlighters,
 		records,
-		sessionRead,
-		patchSource,
-		reviewedSource,
-		bridge,
+		sessionClient,
+		coordinator,
 		async reloadConfig(cwd) {
 			config = await loadConfig(cwd);
 			await highlighters.refresh(config);
