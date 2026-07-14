@@ -12,6 +12,10 @@ pi-hunk is a lightweight Hunk orchestrator for Pi with Shiki-highlighted inline 
 4. Choose `Submit now`, `Keep for later`, or `Abandon`.
 5. After requested changes, wait for Pi to settle, re-review, and submit an empty review to approve.
 
+When no Hunk session exists, same-terminal review temporarily stops Pi's TUI,
+launches `hunk diff --watch --no-exclude-untracked`, and restores Pi after Hunk
+exits.
+
 Hunk owns human review. Pi orchestrates and persists captured snapshots; the model receives only explicitly submitted notes. Approval never starts a model turn.
 
 Freshness covers the complete changeset, not only Pi's wrapped tools. A live Hunk session is authoritative. An owned default Git working-tree review also has a Git fallback that includes untracked files. Unsupported sources, unavailable sessions without an eligible fallback, and failed freshness probes report `unknown` rather than heuristically claiming the review is clean.
@@ -19,6 +23,14 @@ Freshness covers the complete changeset, not only Pi's wrapped tools. A live Hun
 ## Optional side pane
 
 If Hunk is already open in another terminal, `/hunk review` attaches read-only and returns immediately. Review there, then use `/hunk submit` in Pi; pi-hunk does not try to focus another terminal.
+
+## Review states
+
+- `hunk · ready` — no active checkpoint.
+- `hunk · reviewing` — a captured review is waiting for submission.
+- `hunk · re-review` — the complete changeset changed after capture.
+- `hunk · approved` — an empty review was explicitly submitted.
+- `hunk · approved · state unknown` — current freshness could not be verified.
 
 ## Install
 
