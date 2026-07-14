@@ -1,66 +1,80 @@
-# pi-hunk demo script — explicit review
+# pi-hunk demo script — v0.8.0
 
-Goal: show Shiki diffs, then human-controlled Hunk checkpoint submission.
+Goal: show Shiki diffs and the complete human-controlled Hunk checkpoint loop.
 
-## Layout
+Install Hunk 0.15.3+ and pi-hunk before recording.
 
-Two panes, same repository:
+## Canonical take — one terminal
 
-```text
-┌───────────────────────┬───────────────────────┐
-│ Hunk side pane         │ pi                     │
-│ human review           │ agent + pi-hunk        │
-└───────────────────────┴───────────────────────┘
-```
+Start `pi` in one terminal. Do not start Hunk first.
 
-Install `hunk` 0.15.3+ and pi-hunk. Start `pi` in right pane. Do **not** start Hunk first for first take.
+### Beat 1 — rendered edit
 
-## Beat 1 — rendered edit
+Ask Pi to make a small `edit` or `write` in a committed demo file. Pause on the pi-hunk output: Shiki tokens, word emphasis, line numbers, folded context, gutter, and file header.
 
-Ask Pi to make a small `edit` in a committed demo file. Pause on pi-hunk output: Shiki tokens, word emphasis, line numbers, folded context, gutter, file header.
+### Beat 2 — review
 
-## Beat 2 — launch review
-
-In Pi, while agent is idle:
+When Pi is idle:
 
 ```text
 /hunk review
 ```
 
-Pi temporarily leaves its TUI, directly runs `hunk diff --watch`, and restores Pi when Hunk quits. Add several user notes with Hunk’s `c` flow. Quit Hunk with `q`.
+Pi temporarily stops its TUI, launches:
 
-Narration: Hunk owns review interaction. pi-hunk only reads complete review exports; it never changes notes.
+```text
+hunk diff --watch --no-exclude-untracked
+```
 
-For second take, first run `hunk diff --watch` in left pane. Then run `/hunk review` in Pi. pi-hunk attaches to existing human-owned side pane instead of launching another Hunk.
+Add one or more user notes in Hunk, then exit Hunk. Pi restores its TUI and shows:
 
-## Beat 3 — submit once
+```text
+Submit now
+Keep for later
+Abandon
+```
 
-Back in Pi:
+Choose `Keep for later` first. Escape has the same effect.
+
+Narration: Hunk owns review interaction. pi-hunk reads only complete
+`session review --include-patch --include-notes --json` exports.
+
+### Beat 3 — submit
+
+Run:
 
 ```text
 /hunk submit
 ```
 
-Show one visible `hunk-review-submission` follow-up. Agent receives checkpoint ID/revision, reviewed ref, patch digest, and exact note bodies; raw patch remains session-only checkpoint data. Agent edits invalidate submitted review to `re_review_due` but do not synthesize a next revision.
+Show one visible `hunk-review-submission` follow-up. The model receives the exact submitted note bodies and coordinates, not raw Hunk controls.
 
-Run `/hunk review` again after edits. Add no notes, quit Hunk, then:
+After Pi makes the requested changes, wait for the agent to settle. Freshness notices changes made by shell commands, plugins, and untracked-file mutations too. Run `/hunk review` again, add no notes, exit Hunk, choose `Submit now`, or run `/hunk submit` if the review was kept for later. The empty review approves locally and starts no model turn.
 
-```text
-/hunk submit
-```
+### Beat 4 — status and abandon
 
-Show local approval confirmation and no model turn.
-
-## Optional cleanup
+Show:
 
 ```text
+/hunk status
 /hunk abandon
 ```
 
-Show abandoned checkpoint and no model turn.
+Abandon starts no model turn.
+
+## Optional second take — side pane
+
+In a second terminal, start:
+
+```text
+hunk diff --watch --no-exclude-untracked
+```
+
+Run `/hunk review` in Pi. pi-hunk attaches to the existing human-owned session, returns without a selector, and advertises `/hunk submit` in Pi. Review in the side pane and submit explicitly from Pi.
 
 ## Recording cues
 
-- Show only `/hunk status`, `/hunk review`, `/hunk submit`, `/hunk abandon`, `/hunk configure` completions.
-- Show attached side-pane reuse in second take.
-- Never show `/hunk send`, auto pickup, steering, or `hunk_review_notes`; removed surface.
+- Show `/hunk review` and `Ctrl+Shift+H` as the two entry points.
+- Show the exact `Submit now`, `Keep for later`, `Abandon` choices.
+- Show `hunk · reviewing`, `hunk · re-review`, and `hunk · approved` status changes.
+- Do not show removed automatic pickup, agent-authored comments, sidecars, or legacy commands.
