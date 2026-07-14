@@ -19,6 +19,7 @@ export interface RenderRecordStore {
 	record(toolCallId: string, record: RenderRecord): void;
 	get(toolCallId: string): RenderRecord | undefined;
 	recentCount(): number;
+	revision(): number;
 	mostRecent(): RenderRecord | undefined;
 	findRecent(filePath: string | undefined, cwd: string): RenderRecord | undefined;
 }
@@ -27,18 +28,23 @@ export function createRenderRecordStore(): RenderRecordStore {
 	const byCall = new Map<string, RenderRecord>();
 	const recent: RenderRecord[] = [];
 	const CAP = 40;
+	let revision = 0;
 
 	return {
 		record(toolCallId, record) {
 			byCall.set(toolCallId, record);
 			recent.unshift(record);
 			recent.splice(CAP);
+			revision++;
 		},
 		get(toolCallId) {
 			return byCall.get(toolCallId);
 		},
 		recentCount() {
 			return recent.length;
+		},
+		revision() {
+			return revision;
 		},
 		mostRecent() {
 			return recent[0];
