@@ -23,7 +23,7 @@ function result(mode: "reuse" | "spawn", snapshot: ReviewSnapshot | undefined, e
 /** Coordinates review ownership. It never mutates Hunk comments or sends model messages. */
 export function createReviewCoordinator(options: {
 	client: HunkSessionClient;
-	capture(snapshot: ReviewSnapshot): void;
+	capture?: (snapshot: ReviewSnapshot, mode: "reuse" | "spawn") => void | Promise<void>;
 	spawn?: HunkSpawner;
 	clock?: Clock;
 }): ReviewCoordinator {
@@ -52,7 +52,6 @@ export function createReviewCoordinator(options: {
 				onSessionLoss: () => {
 					state.exited = true;
 					const snapshot = retain(state.lease.latest());
-					if (snapshot) options.capture(snapshot);
 				},
 			}),
 		};
@@ -68,13 +67,13 @@ export function createReviewCoordinator(options: {
 				const read = await options.client.readReview(ctx.cwd, config, probe.value.sessionId, ctx.signal);
 				if (!read.ok) return result("reuse", undefined, read.error);
 				const snapshot = retain(read.value.snapshot)!;
-				options.capture(snapshot);
+				await options.capture?.(snapshot, "reuse");
 				const state = startLease("reuse", ctx.cwd, config, probe.value.sessionId);
 				if (target) void options.client.navigate(ctx.cwd, config, probe.value.sessionId, target, ctx.signal);
 				return { ...result("reuse", snapshot), sessionId: state.lease.sessionId };
 			}
 			if (probe.error.kind !== "session_disappeared") return result("spawn", undefined, probe.error);
-			if (ctx.mode !== "tui") return result("spawn", undefined, { ...probe.error, message: "/hunk review needs TUI mode to launch Hunk." });
+			if (ctx.mode !== "tui") return result("spawn", undefined, { ...probe.error, message: "/hunk review needs TUI mode to launch Hunk. Start it externally with: hunk diff --watch --no-exclude-untracked" });
 
 			let handoff: HunkHandoffResult = result("spawn", undefined);
 			await ctx.ui.custom<void>((tui, _theme, _keys, done) => {
@@ -88,14 +87,13 @@ export function createReviewCoordinator(options: {
 					onSessionReady: (lease) => {
 						stopLease();
 						leaseState = { lease, exited: false };
-						const snapshot = retain(lease.latest());
-						if (snapshot) options.capture(snapshot);
+						retain(lease.latest());
 					},
 				})
-					.then((next) => {
+					.then(async (next) => {
 						handoff = next;
 						const snapshot = retain(next.lastValidExport);
-						if (snapshot) options.capture(snapshot);
+						if (snapshot) await options.capture?.(snapshot, "spawn");
 						if (leaseState) leaseState.exited = true;
 					})
 					.finally(() => done());

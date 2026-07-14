@@ -94,8 +94,6 @@ export interface CheckpointStore {
 	capture(snapshot: ReviewSnapshot, baseline?: ChangesetBaseline): CheckpointResult;
 	submit(): CheckpointResult;
 	reconcileChangeset(comparison: ChangesetComparison): CheckpointResult;
-	/** Transitional compatibility for the pre-v0.8 wrapper seam. */
-	invalidateForAgentEdit(): CheckpointResult;
 	abandon(): CheckpointResult;
 	rehydrate(entries: readonly unknown[]): void;
 }
@@ -214,10 +212,6 @@ export function createCheckpointStore(
 				return checkpoint ? success(checkpoint, false) : error("invalid_transition", "No review checkpoint exists.");
 			}
 			if (checkpoint.state === "re_review_due") return success(checkpoint, false);
-			return transition("re_review_due", true, "changeset_changed");
-		},
-		invalidateForAgentEdit() {
-			if (!checkpoint || (checkpoint.state !== "reviewing" && checkpoint.state !== "changes_requested")) return error("invalid_transition", "No active review needs invalidation.");
 			return transition("re_review_due", true, "changeset_changed");
 		},
 		abandon() {

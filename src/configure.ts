@@ -247,7 +247,7 @@ export async function openHunkConfig(
 			config: capped,
 			highlighter: getHighlighter(capped, requestPreviewRender),
 			theme,
-			liveSession: true,
+			hunkHint: "/hunk review (Ctrl+Shift+H)",
 			invalidate: requestPreviewRender,
 		});
 	}
