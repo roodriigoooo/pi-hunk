@@ -1,7 +1,7 @@
 {
   "name": "@roodriigoooo/pi-hunk",
-  "version": "0.7.0",
-  "description": "Review-first Shiki terminal diffs and spatial Hunk review notes for pi.",
+  "version": "0.8.0",
+  "description": "A lightweight Hunk orchestrator for Pi with Shiki-highlighted inline diffs and explicit human review checkpoints.",
   "type": "module",
   "license": "MIT",
   "author": "rosastre",

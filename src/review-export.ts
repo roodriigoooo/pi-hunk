@@ -29,6 +29,7 @@ export type ReviewSnapshot = Readonly<{
 	sessionId: string;
 	source: JsonValue;
 	reviewedRef?: string;
+	targetSignature?: string;
 	files: readonly ReviewFile[];
 	notes: readonly ReviewNote[];
 	patchDigest: string;
@@ -87,8 +88,12 @@ export function patchDigest(files: readonly Pick<ReviewFile, "path" | "previousP
 	return digest(parts);
 }
 
-/** Patch identity also binds a Hunk-provided reviewed ref when present. */
-export function reviewIdentity(patch: string, reviewedRef?: string): string {
+/** Patch identity also binds explicit Hunk target metadata when present. */
+export function reviewIdentity(patch: string, reviewedRef?: string, targetSignature?: string): string {
+	return digest([patch, reviewedRef ?? "", targetSignature ?? ""]);
+}
+
+function legacyReviewIdentity(patch: string, reviewedRef?: string): string {
 	return digest([patch, reviewedRef ?? ""]);
 }
 
@@ -100,10 +105,50 @@ function isJsonValue(value: unknown): value is JsonValue {
 	return false;
 }
 
+const TARGET_FIELDS = ["ref", "range", "diffRange", "base", "head", "from", "to", "pathspec", "pathspecs", "paths", "include", "exclude"] as const;
+
+function explicitTargetFields(value: Record<string, unknown>): Record<string, JsonValue> {
+	const fields: Record<string, JsonValue> = {};
+	for (const key of TARGET_FIELDS) {
+		if (value[key] !== undefined && isJsonValue(value[key])) fields[key] = clone(value[key]);
+	}
+	return fields;
+}
+
+function explicitTargetValue(review: Record<string, unknown>): JsonValue | undefined {
+	const sources = [
+		review,
+		object(review.input) ? review.input : undefined,
+		object(review.target) ? review.target : undefined,
+		object(review.diff) ? review.diff : undefined,
+		object(review.context) ? review.context : undefined,
+		object(review.session) ? review.session : undefined,
+	].filter((value): value is Record<string, unknown> => !!value);
+	const fields: Record<string, JsonValue> = {};
+	for (const source of sources) {
+		const selected = explicitTargetFields(source);
+		for (const [key, value] of Object.entries(selected)) fields[key] = value;
+	}
+	return Object.keys(fields).length ? fields : undefined;
+}
+
+/** Stable signature of only structured Hunk target metadata.
+ * Display titles and source labels are intentionally excluded. */
+export function targetSignatureFromReview(review: Record<string, unknown>): string | undefined {
+	const target = explicitTargetValue(review);
+	return target ? digest([canonical(target)]) : undefined;
+}
+
+export function targetSignatureFromSnapshot(snapshot: Pick<ReviewSnapshot, "source" | "targetSignature">): string {
+	if (snapshot.targetSignature) return snapshot.targetSignature;
+	return object(snapshot.source) ? targetSignatureFromReview(snapshot.source) ?? "" : "";
+}
+
 /** Validate a serialized checkpoint snapshot before trusting session data. */
 export function isReviewSnapshot(value: unknown): value is ReviewSnapshot {
 	if (!object(value) || value.version !== 1 || !rawString(value.sessionId) || !object(value.source)) return false;
 	if (value.reviewedRef !== undefined && !rawString(value.reviewedRef)) return false;
+	if (value.targetSignature !== undefined && !rawString(value.targetSignature)) return false;
 	if (!Array.isArray(value.files) || value.files.length < 1 || !Array.isArray(value.notes)) return false;
 	const fileKeys = new Set<string>();
 	for (const file of value.files) {
@@ -125,7 +170,9 @@ export function isReviewSnapshot(value: unknown): value is ReviewSnapshot {
 	}
 	if (!isJsonValue(value.source) || typeof value.patchDigest !== "string" || typeof value.reviewIdentity !== "string") return false;
 	const snapshot = value as unknown as ReviewSnapshot;
-	return patchDigest(snapshot.files) === snapshot.patchDigest && reviewIdentity(snapshot.patchDigest, snapshot.reviewedRef) === snapshot.reviewIdentity;
+	const currentIdentity = reviewIdentity(snapshot.patchDigest, snapshot.reviewedRef, snapshot.targetSignature);
+	const legacyIdentity = snapshot.targetSignature === undefined ? legacyReviewIdentity(snapshot.patchDigest, snapshot.reviewedRef) : "";
+	return patchDigest(snapshot.files) === snapshot.patchDigest && (currentIdentity === snapshot.reviewIdentity || legacyIdentity === snapshot.reviewIdentity);
 }
 
 function reviewedRefFrom(review: Record<string, unknown>): string | undefined {
@@ -143,14 +190,7 @@ function reviewedRefFrom(review: Record<string, unknown>): string | undefined {
 		session.reviewedRef, session.reviewRef, session.diffRange, session.range, session.ref, session.targetRef, session.compare,
 	];
 	for (const value of direct) if (typeof value === "string" && value.length) return value;
-	const title = review.title ?? session.title;
-	const sourceLabel = review.sourceLabel ?? session.sourceLabel;
-	if (typeof title !== "string" || !title.length) return undefined;
-	if (typeof sourceLabel === "string" && sourceLabel.length) {
-		const name = sourceLabel.split(/[\\/]/).filter(Boolean).pop();
-		if (name && title.startsWith(`${name} `)) return title.slice(name.length + 1) || undefined;
-	}
-	return title;
+	return undefined;
 }
 
 function sourceMetadata(review: Record<string, unknown>): JsonValue {
@@ -210,6 +250,7 @@ function comparableSnapshot(snapshot: ReviewSnapshot): JsonValue {
 		sessionId: snapshot.sessionId,
 		source: clone(snapshot.source),
 		reviewedRef: snapshot.reviewedRef ?? null,
+		targetSignature: snapshot.targetSignature ?? null,
 		files: sorted(snapshot.files),
 		notes: sorted(snapshot.notes),
 		patchDigest: snapshot.patchDigest,
@@ -273,6 +314,7 @@ export function normalizeReviewExport(payload: unknown): ReviewExportResult {
 	}
 
 	const reviewedRef = reviewedRefFrom(review);
+	const targetSignature = targetSignatureFromReview(review);
 	const patch = patchDigest(files);
-	return { ok: true, snapshot: freeze({ version: 1, sessionId, source: sourceMetadata(review), reviewedRef, files: freeze(files), notes: freeze(notes), patchDigest: patch, reviewIdentity: reviewIdentity(patch, reviewedRef) }) };
+	return { ok: true, snapshot: freeze({ version: 1, sessionId, source: sourceMetadata(review), reviewedRef, targetSignature, files: freeze(files), notes: freeze(notes), patchDigest: patch, reviewIdentity: reviewIdentity(patch, reviewedRef, targetSignature) }) };
 }

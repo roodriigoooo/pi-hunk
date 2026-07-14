@@ -60,6 +60,7 @@ const payload = () => ({
   reviewNotes: JSON.parse(readFileSync(notesFile, "utf8"))
 });
 if (args[0] === "diff" && args[1] === "--watch") {
+  writeFileSync(".fake-hunk-args", args.join("\\n"));
   writeFileSync(marker, "live");
   setTimeout(() => { try { rmSync(marker); } catch {} process.exit(0); }, 700);
 } else if (args[0] === "session" && args[1] === "get") {
@@ -85,9 +86,15 @@ if (args[0] === "diff" && args[1] === "--watch") {
 	const sent = [];
 	const statuses = new Map();
 	const configureSnapshots = [];
+	const selectors = [];
+	const shortcuts = new Map();
 	const tui = { stopped: 0, started: 0, redraws: 0, stop() { this.stopped++; }, start() { this.started++; }, requestRender() { this.redraws++; } };
 	const ui = {
 		theme: theme(), setStatus: (key, value) => statuses.set(key, value), notify: (message, type = "info") => notifications.push({ message, type }),
+		select: async (title, options) => {
+			selectors.push({ title, options });
+			return "Keep for later";
+		},
 		custom: (factory) => new Promise((resolve, reject) => {
 			let done = false;
 			const finish = (value) => { if (!done) { done = true; resolve(value); } };
@@ -111,7 +118,7 @@ if (args[0] === "diff" && args[1] === "--watch") {
 	const handlers = new Map();
 	const pi = {
 		on(event, handler) { const list = handlers.get(event) ?? []; list.push(handler); handlers.set(event, list); },
-		registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, options) { commands.set(name, options); }, registerShortcut() {}, registerFlag() {}, getFlag() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
+		registerTool(tool) { tools.set(tool.name, tool); }, registerCommand(name, options) { commands.set(name, options); }, registerShortcut(key, options) { shortcuts.set(key, options); }, registerFlag() {}, getFlag() {}, registerMessageRenderer() {}, registerEntryRenderer() {},
 		sendMessage(message, options) { sent.push({ message, options }); }, sendUserMessage() { throw new Error("legacy delivery must not run"); }, appendEntry(customType, data) { entries.push({ type: "custom", customType, data }); },
 		setSessionName() {}, getSessionName() {}, setLabel() {}, exec: async () => ({ stdout: "", stderr: "", code: 0 }), getActiveTools: () => [...tools.keys()], getAllTools: () => [], setActiveTools() {}, getCommands: () => [], setModel: async () => true, getThinkingLevel: () => "high", setThinkingLevel() {}, registerProvider() {}, unregisterProvider() {}, events: { on() {}, emit() {} },
 	};
@@ -121,13 +128,14 @@ if (args[0] === "diff" && args[1] === "--watch") {
 	assert.ok(tools.has("write") && tools.has("edit"), "diff tools remain");
 	assert.equal(tools.has("hunk_review_notes"), false, "legacy review tool removed");
 	assert.ok(commands.has("hunk"));
+	assert.equal(shortcuts.get("ctrl+shift+h").description, "Open Hunk review checkpoint.");
 	const command = commands.get("hunk");
 	assert.deepEqual(command.getArgumentCompletions("").map((item) => item.value), ["status", "review", "submit", "abandon", "configure"]);
 	assert.equal(handlers.has("before_agent_start"), false, "automatic pickup removed");
 
 	const commandCtx = ctx(tmp, ui, entries);
 	for (const handler of handlers.get("session_start") ?? []) await handler({ type: "session_start" }, commandCtx);
-	assert.equal(statuses.get("hunk"), "hunk ✦");
+	assert.equal(statuses.get("hunk"), "hunk · ready");
 
 	// Existing write/edit rendering and queued-write behavior remain intact.
 	const writeTool = tools.get("write");
@@ -192,12 +200,22 @@ if (args[0] === "diff" && args[1] === "--watch") {
 	const noticeStart = notifications.length;
 	await command.handler("review", commandCtx);
 	assert.deepEqual([tui.stopped, tui.started, tui.redraws], [1, 1, 1], "spawn handoff restores Pi TUI once");
+	assert.deepEqual(selectors.at(-1).options, ["Submit now", "Keep for later", "Abandon"]);
+	assert.match(await readFile(path.join(tmp, ".fake-hunk-args"), "utf8"), /--no-exclude-untracked/);
 	assert.equal(notifications.slice(noticeStart).some((notice) => notice.message === "Hunk session disappeared."), false, "normal q exit is not reported as failure");
 	await command.handler("submit", commandCtx);
 	assert.equal(sent.length, 1);
 	assert.equal(entries.at(-1).data.state, "approved");
 	assert.ok(notifications.some((notice) => /approved.*No model turn started/.test(notice.message)));
 	assert.ok(entries.filter((entry) => entry.customType === "hunk-checkpoint").every((entry) => Number.isFinite(Date.parse(entry.data.at))), "checkpoint journal entries carry timestamps");
+
+	// Approval is invalidated by a later complete Hunk changeset change.
+	await writeFile(path.join(tmp, ".fake-hunk-live"), "live");
+	await writeFile(path.join(tmp, ".fake-hunk-patch"), "--- a/smoke.ts\n+++ b/smoke.ts\n@@ -1,1 +1,1 @@\n-old\n+post-approval");
+	for (const handler of handlers.get("agent_settled") ?? []) await handler({ type: "agent_settled" }, commandCtx);
+	assert.equal(entries.at(-1).data.state, "re_review_due");
+	await writeFile(path.join(tmp, ".fake-hunk-patch"), originalPatch);
+	await rm(path.join(tmp, ".fake-hunk-live"), { force: true });
 
 	const hunkDir = path.join(tmp, ".pi", "hunk");
 	let sidecars = [];

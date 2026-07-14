@@ -136,7 +136,7 @@ export async function handoffToSpawnedHunk(options: {
 	try {
 		options.tui.stop();
 		stoppedTui = true;
-		child = launch(options.config.hunk.binary, ["diff", "--watch"], { cwd: options.cwd, shell: false, stdio: "inherit" });
+		child = launch(options.config.hunk.binary, ["diff", "--watch", "--no-exclude-untracked"], { cwd: options.cwd, shell: false, stdio: "inherit" });
 		const closed = childClosed(child);
 		let processDone = false;
 		void closed.then(() => (processDone = true));

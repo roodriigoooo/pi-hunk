@@ -365,9 +365,9 @@ function hunkCaption(hunk: ParsedHunk, filePath: string, cwd: string, theme: The
 	return `${theme.fg("accent", "@@")} ${theme.fg("toolTitle", "hunk")} ${theme.fg("dim", "·")} ${theme.fg("muted", loc)}`;
 }
 
-function hunkFooter(config: HunkConfig, theme: Theme, hasLiveSession: boolean): string[] {
-	if (!config.showHunkHint || !config.hunk.enabled || !hasLiveSession) return [];
-	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", "/hunk review")} opens or attaches Hunk ${theme.fg("dim", "·")} ${theme.fg("muted", "/hunk submit")} delivers checkpointed notes`];
+function hunkFooter(config: HunkConfig, theme: Theme, hunkHint: string | undefined): string[] {
+	if (!config.showHunkHint || !config.hunk.enabled || !hunkHint) return [];
+	return [`${theme.fg("accent", "Hunk ✦")} ${theme.fg("muted", hunkHint)}`];
 }
 
 function annotationText(annotation: DiffLineAnnotation): string {
@@ -396,7 +396,7 @@ export type DiffViewInput = {
 	config: HunkConfig;
 	highlighter: Highlighter | undefined;
 	theme: Theme;
-	liveSession?: boolean;
+	hunkHint?: string;
 	annotations?: DiffLineAnnotations;
 	invalidate?: () => void;
 };
@@ -491,7 +491,7 @@ export function buildDiffLayout(input: DiffViewInput): DiffLayout {
 
 /** Render a patch to terminal lines: file header + layout rows + footers. */
 export function renderDiffLines(input: DiffViewInput): string[] {
-	const { filePath, cwd, title, config, theme, liveSession } = input;
+	const { filePath, cwd, title, config, theme, hunkHint } = input;
 	const palette = resolvePalette(config, theme);
 	const { rows, truncated, stats } = buildDiffLayout(input);
 	const lines: string[] = [];
@@ -513,7 +513,7 @@ export function renderDiffLines(input: DiffViewInput): string[] {
 	for (const row of rows) lines.push(row.text);
 
 	if (truncated) lines.push(`${palette.meta}… truncated after ${config.maxRenderedLines} rendered diff rows${ANSI_RESET}`);
-	const footer = hunkFooter(config, theme, !!liveSession);
+	const footer = hunkFooter(config, theme, hunkHint);
 	if (footer.length) {
 		lines.push(theme.fg("borderMuted", "─".repeat(24)));
 		lines.push(...footer);

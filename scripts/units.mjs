@@ -32,6 +32,9 @@ const { applyHunkPreset, choicesForSpec, descriptionForSpec, hunkConfigGroups, h
 const { createHighlighterCache } = await jiti.import(path.join(repoRoot, "src/highlighter-cache.ts"), { default: false });
 const { renderCodeLine, styleToken, wordHighlightAnsi } = await jiti.import(path.join(repoRoot, "src/styling.ts"), { default: false });
 const { normalizeReviewExport, patchDigest, sameSnapshot } = await jiti.import(path.join(repoRoot, "src/review-export.ts"), { default: false });
+const { createChangesetBaseline, changesetDigest, compareGitFingerprint, compareHunkFingerprint, gitFingerprint, isDefaultGitWorkingTreeReview } = await jiti.import(path.join(repoRoot, "src/changeset.ts"), { default: false });
+const { createGitChangesetAdapter } = await jiti.import(path.join(repoRoot, "src/git-changeset.ts"), { default: false });
+const { presentHunk } = await jiti.import(path.join(repoRoot, "src/hunk-presentation.ts"), { default: false });
 const { createCheckpointStore } = await jiti.import(path.join(repoRoot, "src/checkpoint-store.ts"), { default: false });
 const { createHunkSessionClient } = await jiti.import(path.join(repoRoot, "src/hunk-session-client.ts"), { default: false });
 const { createSamplingLease, handoffToSpawnedHunk } = await jiti.import(path.join(repoRoot, "src/hunk-handoff.ts"), { default: false });
@@ -210,7 +213,7 @@ assert.equal(snapshot.notes[0].title, "Exact note");
 assert.equal(snapshot.files[0].id, "file-a");
 assert.equal(snapshot.source.repoRoot, "/pi-hunk");
 assert.equal(snapshot.source.inputKind, "vcs");
-assert.equal(snapshot.reviewedRef, "main...topic");
+assert.equal(snapshot.reviewedRef, undefined, "display titles are not reviewed refs");
 const nestedRef = normalizeReviewExport({ ...review(), title: undefined, input: { range: "main...nested", kind: "vcs" } }).snapshot;
 assert.equal(nestedRef.reviewedRef, "main...nested", "nested Hunk review coordinates are preserved");
 assert.deepEqual(nestedRef.source.input, { range: "main...nested", kind: "vcs" });
@@ -227,6 +230,50 @@ assert.equal(normalizeReviewExport({ comments: [{ type: "user", body: "legacy" }
 assert.equal(normalizeReviewExport({ sessionId: "s", files: [{ path: "a", additions: 1 }], reviewNotes: [] }).ok, false, "missing patch rejected");
 assert.equal(normalizeReviewExport(review({ notes: [{ source: "user", filePath: "a.ts", body: 4 }] })).ok, false, "malformed human note rejected");
 assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, review().files[0]] }).ok, false, "duplicate reviewed file paths rejected");
+
+// Complete changeset fingerprints are order-independent, include untracked
+// files, and never infer an unsupported target from a display title.
+{
+	const untrackedPatch = "--- /dev/null\n+++ b/untracked.ts\n@@ -0,0 +1,1 @@\n+new file";
+	const withUntracked = normalizeReviewExport({
+		...review({ notes: [] }),
+		files: [...review({ notes: [] }).files.slice(0, 1), { path: "untracked.ts", patch: untrackedPatch, additions: 1, deletions: 0, hunkCount: 1, hunks: [{ oldStart: 0, newStart: 1 }] }],
+	}).snapshot;
+	assert.equal(changesetDigest(withUntracked.files), changesetDigest([...withUntracked.files].reverse()), "file reordering does not change the digest");
+	assert.notEqual(changesetDigest(withUntracked.files), changesetDigest(withUntracked.files.map((file) => file.path === "a.ts" ? { ...file, patch: patchB } : file)), "tracked edits change the digest");
+	assert.equal(isDefaultGitWorkingTreeReview(snapshot), true);
+	assert.equal(isDefaultGitWorkingTreeReview(nestedRef), false, "explicit ranges do not get a Git fallback");
+
+	const calls = [];
+	let tracked = patchA;
+	const adapter = createGitChangesetAdapter(async (args) => {
+		calls.push(args);
+		if (args[0] === "diff" && args[1] === "--no-index") {
+			return { stdout: `diff --git a/untracked.ts b/untracked.ts\nnew file mode 100644\n${untrackedPatch}`, stderr: "", code: 1, signal: null };
+		}
+		if (args[0] === "diff") return { stdout: `diff --git a/a.ts b/a.ts\nindex 1..2 100644\n${tracked}`, stderr: "", code: 0, signal: null };
+		return { stdout: "?? untracked.ts\0", stderr: "", code: 0, signal: null };
+	});
+	const fallback = await adapter.captureFallback("/repo", withUntracked);
+	assert.ok(fallback.fingerprint);
+	assert.ok(calls.some((args) => args.includes("--no-optional-locks")), "status uses no optional locks");
+	assert.ok(calls.some((args) => args.includes("--no-index")), "untracked files use argument-array diff");
+	const currentGit = await adapter.read("/repo");
+	assert.equal(compareGitFingerprint({ hunk: { sessionId: "s", targetSignature: "", patchDigest: "h" }, git: fallback.fingerprint, renderRevision: 0 }, currentGit.value.fingerprint).kind, "unchanged");
+	tracked = patchB;
+	const changedGit = await adapter.read("/repo");
+	assert.equal(compareGitFingerprint({ hunk: { sessionId: "s", targetSignature: "", patchDigest: "h" }, git: fallback.fingerprint, renderRevision: 0 }, changedGit.value.fingerprint).kind, "changed");
+	assert.equal(calls[0][0], "diff");
+
+	const missingGit = createGitChangesetAdapter(async () => ({ stdout: "", stderr: "", code: null, signal: null, launchError: Object.assign(new Error("missing"), { code: "ENOENT" }) }));
+	assert.equal((await missingGit.read("/repo")).reason, "git_unavailable");
+	const timedGit = createGitChangesetAdapter(async () => ({ stdout: "", stderr: "", code: null, signal: null, timedOut: true }));
+	assert.equal((await timedGit.read("/repo")).reason, "git_timeout");
+	const malformedGit = createGitChangesetAdapter(async (args) => args[0] === "diff" ? { stdout: "not a diff", stderr: "", code: 0, signal: null } : { stdout: "", stderr: "", code: 0, signal: null });
+	assert.equal((await malformedGit.read("/repo")).reason, "git_malformed");
+	const stagedGit = createGitChangesetAdapter(async (args) => args[0] === "diff" ? { stdout: "", stderr: "", code: 0, signal: null } : { stdout: "M  staged.ts\0", stderr: "", code: 0, signal: null });
+	assert.equal((await stagedGit.read("/repo")).reason, "git_staged_target");
+}
 
 // Append-only state transitions and immutable revisions.
 {
@@ -252,9 +299,9 @@ assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, rev
 	assert.equal(requested.state, "changes_requested");
 	assert.equal(requested.submittedAt, requested.updatedAt);
 	assert.equal(store.capture(changedNotes).ok, false, "submitted review cannot be recaptured before invalidation");
-	assert.equal(store.invalidateForAgentEdit().checkpoint.state, "re_review_due");
+	assert.equal(store.reconcileChangeset({ kind: "changed", source: "hunk", unrendered: false }).checkpoint.state, "re_review_due");
 	const empty = normalizeReviewExport(review({ notes: [] })).snapshot;
-	assert.equal(store.capture(empty).checkpoint.revision, 3);
+	assert.equal(store.beginReview(empty).checkpoint.revision, 3);
 	const approved = store.submit().checkpoint;
 	assert.equal(approved.state, "approved");
 	assert.equal(approved.submittedAt, approved.updatedAt);
@@ -289,6 +336,49 @@ assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, rev
 	throwingTransition.rehydrate([{ type: "custom", customType: "hunk-checkpoint", data: events[0] }]);
 	assert.throws(() => throwingTransition.submit(), /journal unavailable/);
 	assert.equal(throwingTransition.current().state, "reviewing", "failed transition persistence leaves state unchanged");
+}
+
+// Changed/unknown reconciliation is monotonic, and explicit reviews remain
+// allowed after a submitted or completed checkpoint.
+{
+	const events = [];
+	const baseline = createChangesetBaseline(snapshot, 4);
+	const store = createCheckpointStore((event) => events.push(event), () => "monotonic", () => "2026-01-01T00:00:00.000Z");
+	const captured = store.beginReview(snapshot, baseline);
+	assert.equal(captured.ok, true);
+	const approved = store.submit();
+	assert.equal(approved.checkpoint.state, "changes_requested", "notes request changes");
+	const due = store.reconcileChangeset({ kind: "changed", source: "git", unrendered: true });
+	assert.equal(due.checkpoint.state, "re_review_due");
+	assert.equal(events.at(-1).reason, "changeset_changed");
+	assert.equal(store.reconcileChangeset({ kind: "unchanged", source: "git" }).checkpoint.state, "re_review_due", "unchanged does not restore a review");
+	const explicit = store.beginReview(snapshot, baseline);
+	assert.equal(explicit.checkpoint.revision, 2, "unchanged explicit review creates a revision");
+	const approvedEmpty = createCheckpointStore(() => {}, () => "approved-id", () => "2026-01-01T00:00:00.000Z");
+	assert.equal(approvedEmpty.beginReview(normalizeReviewExport(review({ notes: [] })).snapshot, baseline).ok, true);
+	assert.equal(approvedEmpty.submit().checkpoint.state, "approved");
+	const nextCheckpoint = approvedEmpty.beginReview(normalizeReviewExport(review({ notes: [] })).snapshot, baseline).checkpoint;
+	assert.equal(nextCheckpoint.revision, 1, "review after approval starts a new checkpoint");
+	assert.equal(nextCheckpoint.id, "approved-id");
+
+	const v1 = createCheckpointStore(() => {});
+	v1.rehydrate([{ type: "custom", customType: "hunk-checkpoint", data: { version: 1, kind: "capture", checkpointId: "v1", revision: 1, at: "2026-01-01T00:00:00.000Z", snapshot } }]);
+	assert.equal(v1.current().baseline.git, undefined, "v1 rehydration has no unsafe Git fallback");
+	const malformed = createCheckpointStore(() => {});
+	malformed.rehydrate([{ type: "custom", customType: "hunk-checkpoint", data: { version: 2, kind: "capture", checkpointId: "bad", revision: 1, at: "2026-01-01T00:00:00.000Z", snapshot, baseline: { hunk: {}, renderRevision: 0 } } }]);
+	assert.equal(malformed.current(), undefined);
+}
+
+// Persistent status and inline hints are a pure state presentation seam.
+{
+	const checkpoint = createCheckpointStore(() => {}, () => "presentation-id", () => "2026-01-01T00:00:00.000Z");
+	const reviewed = checkpoint.beginReview(snapshot).checkpoint;
+	assert.deepEqual(presentHunk({ enabled: true, checkpoint: reviewed, liveSession: "none" }), { status: "hunk · reviewing · 1 note", hunkHint: "/hunk submit" });
+	assert.equal(presentHunk({ enabled: true, checkpoint: reviewed, liveSession: "elsewhere" }).hunkHint, "review active elsewhere · /hunk submit");
+	const external = checkpoint.reconcileChangeset({ kind: "changed", source: "git", unrendered: true }).checkpoint;
+	assert.equal(presentHunk({ enabled: true, checkpoint: external, liveSession: "none", freshness: { kind: "changed", source: "git", unrendered: true } }).hunkHint, "changeset updated outside inline diff · /hunk review");
+	assert.equal(presentHunk({ enabled: true, checkpoint: external, liveSession: "none", freshness: { kind: "unknown", reason: "missing_git_fallback" } }).hunkHint, "/hunk status");
+	assert.deepEqual(presentHunk({ enabled: true, checkpoint: { ...external, state: "approved" }, liveSession: "none", freshness: { kind: "unchanged", source: "hunk" } }), { status: "hunk · approved" });
 }
 
 // Read-only client: exact review export command, no legacy comment API.
@@ -369,7 +459,7 @@ assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, rev
 	await new Promise((resolve) => setImmediate(resolve));
 	child.emit("close", 0, null);
 	const result = await handoff;
-	assert.deepEqual(calls[0].args, ["diff", "--watch"]);
+	assert.deepEqual(calls[0].args, ["diff", "--watch", "--no-exclude-untracked"]);
 	assert.equal(calls[0].options.shell, false);
 	assert.equal(calls[0].options.stdio, "inherit");
 	assert.equal(result.lastValidExport.patchDigest, snapshot.patchDigest);
@@ -588,7 +678,7 @@ assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, rev
 		" line1", " line2", " line3", "-old4", "+new4", " line5", " line6", " line7", " line8",
 	].join("\n");
 	const config = { ...DEFAULT_CONFIG, lineNumbers: false, header: "minimal", compactUnchanged: true, contextRadius: 1, maxRenderedLines: 260 };
-	const layout = buildDiffLayout({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config, highlighter: fakeHighlighter, theme: fakeTheme(), liveSession: false });
+	const layout = buildDiffLayout({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config, highlighter: fakeHighlighter, theme: fakeTheme(), hunkHint: undefined });
 	assert.equal(layout.stats.added, 1);
 	assert.equal(layout.stats.removed, 1);
 	assert.equal(layout.stats.files, 1);
@@ -598,10 +688,10 @@ assert.equal(normalizeReviewExport({ ...review(), files: [...review().files, rev
 	const added = layout.rows.find((row) => row.kind === "code" && stripAnsi(row.text).includes("new4"));
 	assert.equal(added.hunkIndex, 0);
 	assert.equal(added.lineIndex, 4);
-	const tiny = buildDiffLayout({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config: { ...config, maxRenderedLines: 2 }, highlighter: fakeHighlighter, theme: fakeTheme(), liveSession: false });
+	const tiny = buildDiffLayout({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config: { ...config, maxRenderedLines: 2 }, highlighter: fakeHighlighter, theme: fakeTheme(), hunkHint: undefined });
 	assert.equal(tiny.truncated, true);
 	assert.ok(tiny.rows.length <= 2);
-	const rendered = renderDiffLines({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config, highlighter: fakeHighlighter, theme: fakeTheme(), liveSession: false });
+	const rendered = renderDiffLines({ patch, filePath: "layout.ts", cwd: repoRoot, title: "unit", config, highlighter: fakeHighlighter, theme: fakeTheme(), hunkHint: undefined });
 	assert.match(rendered.map(stripAnsi).join("\n"), /layout\.ts[\s\S]*new4/);
 }
 
